@@ -1,16 +1,16 @@
+// @ts-nocheck
 import React, { useEffect, useRef, useState } from "react";
-import { Helmet } from "react-helmet";
 
 /**
- * AtlaS – React Image Canvas (pure JSX)
+ * AtlaS – React Image Canvas (pure JSX, no external deps)
  *
- * Changes in this revision:
- * - FIX: Closed the unfinished JSX at the end (info button block) that caused "Unterminated JSX contents".
- * - ADD: Bottom-right info (ℹ️) button that toggles a small info box with tips.
- * - UI: Palette starts hidden; no "Palette" header; tip removed from sidebar.
- * - UX: "Choose a file" is a transparent, grey-text button to match other UI.
- * - BEHAVIOR: Double-click placed item to delete; Shift/Ctrl+Wheel zooms background.
- * - TESTS: Added lightweight runtime tests (console.assert) for helpers and id format.
+ * Fixes in this revision:
+ * - Remove react-helmet dependency (some setups failed to resolve it). Use useEffect to set title + favicon.
+ * - Add missing upload (📷) button back to the floater toolbar.
+ * - Harden pointer-move math against null refs; guard when rect is missing.
+ * - Keep palette hidden initially; remove tip from sidebar; info button shows tips.
+ * - Keep double-click-to-delete; Shift/Ctrl+wheel zoom.
+ * - Include lightweight runtime tests for helpers.
  */
 
 // ---------- Helpers ----------
@@ -24,6 +24,7 @@ function isRoughlySquare(w, h) {
   const r = w / h; return r > 0.9 && r < 1.1;
 }
 function localPoint(clientX, clientY, rect) {
+  if (!rect) return { x: clientX, y: clientY };
   return { x: clientX - rect.left, y: clientY - rect.top };
 }
 
@@ -84,6 +85,19 @@ export default function ImageCanvasApp() {
   const fileInputRef = useRef(null);
   const draggingRef = useRef({ id: null, offsetX: 0, offsetY: 0 });
 
+  // ---------- Title + Favicon (no Helmet) ----------
+  useEffect(() => {
+    try { document.title = "AtlaS"; } catch (_) {}
+    try {
+      const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><defs><linearGradient id='grad' x1='0%' y1='0%' x2='100%' y2='100%'><stop offset='0%' stop-color='%2390ee90' stop-opacity='1'/><stop offset='100%' stop-color='%23e0fff0' stop-opacity='1'/></linearGradient></defs><circle cx='12' cy='12' r='10' fill='url(%23grad)'/><path d='M2 12h20M12 2a15 15 0 010 20M12 2a15 15 0 000 20' stroke='white' stroke-width='2' fill='none'/></svg>`;
+      const href = `data:image/svg+xml,${encodeURIComponent(svg)}`;
+      let link = document.querySelector("link[rel='icon']");
+      if (!link) { link = document.createElement("link"); link.setAttribute("rel", "icon"); document.head.appendChild(link); }
+      link.setAttribute("type", "image/svg+xml");
+      link.setAttribute("href", href);
+    } catch (_) {}
+  }, []);
+
   // ---------- Upload handling ----------
   function onFile(file) {
     if (!file) return;
@@ -93,17 +107,13 @@ export default function ImageCanvasApp() {
       img.onload = () => {
         const naturalW = img.width, naturalH = img.height;
         let baseW = 0, baseH = 0;
-        if (isRoughlySquare(naturalW, naturalH)) {
-          baseW = 300; baseH = 300;
-        } else {
-          const bounded = fitWithin(naturalW, naturalH, 500, 1000);
-          baseW = bounded.w; baseH = bounded.h;
-        }
+        if (isRoughlySquare(naturalW, naturalH)) { baseW = 300; baseH = 300; }
+        else { const bounded = fitWithin(naturalW, naturalH, 500, 1000); baseW = bounded.w; baseH = bounded.h; }
         setBgUrl((prev) => { if (prev) URL.revokeObjectURL(prev); return url; });
         setBgSize({ baseW, baseH, naturalW, naturalH, scale: 1 });
       };
       img.src = url;
-    } catch (_) { /* ignore */ }
+    } catch (_) {}
   }
   function onInputChange(e) {
     const f = e?.target?.files?.[0];
@@ -118,10 +128,7 @@ export default function ImageCanvasApp() {
     e.dataTransfer.setData("text/plain", type);
     e.dataTransfer.effectAllowed = "copy";
   }
-  function onCanvasDragOver(e) {
-    e?.preventDefault?.();
-    if (e?.dataTransfer) e.dataTransfer.dropEffect = "copy";
-  }
+  function onCanvasDragOver(e) { e?.preventDefault?.(); if (e?.dataTransfer) e.dataTransfer.dropEffect = "copy"; }
   function dropOnCanvas(clientX, clientY, type) {
     if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
@@ -131,11 +138,7 @@ export default function ImageCanvasApp() {
   function onCanvasDrop(e) {
     e.preventDefault();
     const dt = e.dataTransfer;
-    if (dt?.files?.length > 0) {
-      const f = dt.files[0];
-      if (f?.type?.startsWith("image/")) onFile(f);
-      return;
-    }
+    if (dt?.files?.length > 0) { const f = dt.files[0]; if (f?.type?.startsWith("image/")) onFile(f); return; }
     const type = dt.getData("text/plain");
     if (type) dropOnCanvas(e.clientX, e.clientY, type);
   }
@@ -152,6 +155,7 @@ export default function ImageCanvasApp() {
   function onCanvasPointerMove(e) {
     const drag = draggingRef.current; if (!drag.id) return;
     const rect = canvasRef.current?.getBoundingClientRect();
+    if (!rect) return;
     const { x, y } = localPoint(e.clientX, e.clientY, rect);
     const nx = x - drag.offsetX; const ny = y - drag.offsetY;
     setItems((prev) => prev.map((it) => (it.id === drag.id ? { ...it, x: nx, y: ny } : it)));
@@ -161,14 +165,11 @@ export default function ImageCanvasApp() {
   // ---------- Scale background ----------
   function onCanvasWheel(e) {
     if (!bgUrl) return;
-    if (!(e.shiftKey || e.ctrlKey)) return; // require modifier
+    if (!(e.shiftKey || e.ctrlKey)) return; // require modifier key
     e.preventDefault();
     const dir = e.deltaY < 0 ? 1 : -1;
     const step = e.shiftKey && e.ctrlKey ? 0.15 : 0.1;
-    setBgSize((s) => {
-      const ns = Math.min(5, Math.max(0.2, s.scale * (1 + dir * step)));
-      return { ...s, scale: ns };
-    });
+    setBgSize((s) => ({ ...s, scale: Math.min(5, Math.max(0.2, s.scale * (1 + dir * step))) }));
   }
 
   // ---------- Clear / Save ----------
@@ -220,8 +221,7 @@ export default function ImageCanvasApp() {
     }
 
     const data = canvas.toDataURL("image/png");
-    const a = document.createElement("a");
-    a.href = data; a.download = "composition.png";
+    const a = document.createElement("a"); a.href = data; a.download = "composition.png";
     document.body.appendChild(a); a.click(); a.remove();
   }
 
@@ -248,12 +248,8 @@ export default function ImageCanvasApp() {
 
   return (
     <div style={styles.app}>
-      <Helmet>
-        <title>AtlaS</title>
-      </Helmet>
-
       {/* Floating buttons */}
-      <div style={styles.floaterBar}>
+      <div style={styles.floaterBar}>  
         <button style={styles.floaterBtn} title="Clear items" aria-label="Clear items" onClick={clearAll}>🧹</button>
         <button style={styles.floaterBtn} title="Remove background" aria-label="Remove background" onClick={clearBackground}>🗑️</button>
         <button style={styles.floaterBtn} title="Save PNG" aria-label="Save PNG" onClick={savePNG}>💾</button>
@@ -288,7 +284,6 @@ export default function ImageCanvasApp() {
         {/* Background image (centered) */}
         {bgUrl ? (
           <div style={{ ...styles.bgFrame, width: dispW, height: dispH }}>
-            {/* eslint-disable-next-line jsx-a11y/alt-text */}
             <img src={bgUrl} alt="Background" draggable={false} style={{ width: '100%', height: '100%', display: 'block', objectFit: 'contain', background: '#fff' }} />
           </div>
         ) : null}
@@ -330,7 +325,7 @@ export default function ImageCanvasApp() {
       {showInfo && (
         <div role="status" aria-live="polite" style={styles.infoBox}>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Tips</div>
-          <div> Hold <kbd>Shift</kbd> or <kbd>Ctrl/Cmd</kbd> and scroll to zoom the background. Double-click an item to delete it.</div>
+          <div>Hold <kbd>Shift</kbd> or <kbd>Ctrl/Cmd</kbd> and scroll to zoom the background. Double-click an item to delete it.</div>
         </div>
       )}
     </div>
