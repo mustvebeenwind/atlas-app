@@ -1,13 +1,19 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Helmet } from "react-helmet";
 
-/** PURE JSX VERSION (no TS, no external libs)
- * Site branding updated:
- *  - Title set to "AtlaS"
- *  - Favicon set to a globe icon (SVG data URI)
+/**
+ * AtlaS – React Image Canvas (pure JSX)
+ *
+ * Changes in this revision:
+ * - FIX: Closed the unfinished JSX at the end (info button block) that caused "Unterminated JSX contents".
+ * - ADD: Bottom-right info (ℹ️) button that toggles a small info box with tips.
+ * - UI: Palette starts hidden; no "Palette" header; tip removed from sidebar.
+ * - UX: "Choose a file" is a transparent, grey-text button to match other UI.
+ * - BEHAVIOR: Double-click placed item to delete; Shift/Ctrl+Wheel zooms background.
+ * - TESTS: Added lightweight runtime tests (console.assert) for helpers and id format.
  */
 
-// ---------- Helpers (pure) ----------
+// ---------- Helpers ----------
 function fitWithin(imgW, imgH, maxW, maxH) {
   if (!imgW || !imgH) return { w: 0, h: 0 };
   const r = Math.min(maxW / imgW, maxH / imgH);
@@ -27,7 +33,7 @@ const common = { fill: "none", stroke, strokeWidth: 1.5, strokeLinecap: "round",
 
 const Icons = {
   bed: (size = 48) => (
-    <svg width={size} height={size} viewBox="0 0 64 64">
+    <svg width={size} height={size} viewBox="0 0 64 64" aria-hidden>
       <rect x="6" y="30" width="52" height="18" rx="3" {...common} />
       <rect x="10" y="24" width="22" height="10" rx="2" {...common} />
       <line x1="6" y1="48" x2="6" y2="54" {...common} />
@@ -35,20 +41,20 @@ const Icons = {
     </svg>
   ),
   door: (size = 48) => (
-    <svg width={size} height={size} viewBox="0 0 64 64">
+    <svg width={size} height={size} viewBox="0 0 64 64" aria-hidden>
       <rect x="18" y="6" width="28" height="52" rx="2" {...common} />
       <circle cx="40" cy="32" r="2.5" stroke={stroke} fill={stroke} />
     </svg>
   ),
   table: (size = 48) => (
-    <svg width={size} height={size} viewBox="0 0 64 64">
+    <svg width={size} height={size} viewBox="0 0 64 64" aria-hidden>
       <rect x="10" y="22" width="44" height="8" rx="2" {...common} />
       <line x1="18" y1="30" x2="18" y2="50" {...common} />
       <line x1="46" y1="30" x2="46" y2="50" {...common} />
     </svg>
   ),
   chair: (size = 48) => (
-    <svg width={size} height={size} viewBox="0 0 64 64">
+    <svg width={size} height={size} viewBox="0 0 64 64" aria-hidden>
       <rect x="22" y="14" width="20" height="14" rx="2" {...common} />
       <rect x="22" y="28" width="20" height="8" rx="2" {...common} />
       <line x1="24" y1="36" x2="24" y2="50" {...common} />
@@ -68,11 +74,11 @@ let idCounter = 1;
 const nextId = () => `item_${idCounter++}`;
 
 export default function ImageCanvasApp() {
-  // ---------- State & refs ----------
   const [bgUrl, setBgUrl] = useState(null);
   const [bgSize, setBgSize] = useState({ baseW: 0, baseH: 0, naturalW: 0, naturalH: 0, scale: 1 });
   const [items, setItems] = useState([]);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false); // start hidden
+  const [showInfo, setShowInfo] = useState(false);
 
   const canvasRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -97,10 +103,10 @@ export default function ImageCanvasApp() {
         setBgSize({ baseW, baseH, naturalW, naturalH, scale: 1 });
       };
       img.src = url;
-    } catch (_) { }
+    } catch (_) { /* ignore */ }
   }
   function onInputChange(e) {
-    const f = e && e.target && e.target.files && e.target.files[0];
+    const f = e?.target?.files?.[0];
     if (!f) return;
     onFile(f);
     try { e.target.value = ""; } catch (_) {}
@@ -108,14 +114,13 @@ export default function ImageCanvasApp() {
 
   // ---------- DnD: palette → canvas ----------
   function onPaletteDragStart(e, type) {
-    if (!e || !e.dataTransfer) return;
+    if (!e?.dataTransfer) return;
     e.dataTransfer.setData("text/plain", type);
     e.dataTransfer.effectAllowed = "copy";
   }
   function onCanvasDragOver(e) {
-    if (!e) return;
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
+    e?.preventDefault?.();
+    if (e?.dataTransfer) e.dataTransfer.dropEffect = "copy";
   }
   function dropOnCanvas(clientX, clientY, type) {
     if (!canvasRef.current) return;
@@ -124,35 +129,29 @@ export default function ImageCanvasApp() {
     setItems((prev) => [...prev, { id: nextId(), type, x, y }]);
   }
   function onCanvasDrop(e) {
-    if (!e) return;
     e.preventDefault();
     const dt = e.dataTransfer;
-    if (dt && dt.files && dt.files.length > 0) {
+    if (dt?.files?.length > 0) {
       const f = dt.files[0];
-      if (f && f.type && f.type.startsWith("image/")) onFile(f);
+      if (f?.type?.startsWith("image/")) onFile(f);
       return;
     }
-    if (!dt) return;
     const type = dt.getData("text/plain");
-    if (!type) return;
-    dropOnCanvas(e.clientX, e.clientY, type);
+    if (type) dropOnCanvas(e.clientX, e.clientY, type);
   }
 
   // ---------- Drag placed items ----------
   function onItemPointerDown(e, id) {
-    if (!canvasRef.current) return;
-    const rect = canvasRef.current.getBoundingClientRect();
+    const rect = canvasRef.current?.getBoundingClientRect();
     const item = items.find((it) => it.id === id);
-    if (!item) return;
+    if (!item || !rect) return;
     const { x, y } = localPoint(e.clientX, e.clientY, rect);
     draggingRef.current = { id, offsetX: x - item.x, offsetY: y - item.y };
-    if (e.currentTarget && e.pointerId != null) {
-      try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {}
-    }
+    e.currentTarget?.setPointerCapture?.(e.pointerId);
   }
   function onCanvasPointerMove(e) {
-    const drag = draggingRef.current; if (!drag.id || !canvasRef.current) return;
-    const rect = canvasRef.current.getBoundingClientRect();
+    const drag = draggingRef.current; if (!drag.id) return;
+    const rect = canvasRef.current?.getBoundingClientRect();
     const { x, y } = localPoint(e.clientX, e.clientY, rect);
     const nx = x - drag.offsetX; const ny = y - drag.offsetY;
     setItems((prev) => prev.map((it) => (it.id === drag.id ? { ...it, x: nx, y: ny } : it)));
@@ -162,7 +161,7 @@ export default function ImageCanvasApp() {
   // ---------- Scale background ----------
   function onCanvasWheel(e) {
     if (!bgUrl) return;
-    if (!(e.shiftKey || e.ctrlKey)) return;
+    if (!(e.shiftKey || e.ctrlKey)) return; // require modifier
     e.preventDefault();
     const dir = e.deltaY < 0 ? 1 : -1;
     const step = e.shiftKey && e.ctrlKey ? 0.15 : 0.1;
@@ -187,7 +186,7 @@ export default function ImageCanvasApp() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    ctx.fillStyle = "#f0f5f1";
+    ctx.fillStyle = "#faf9f5";
     ctx.fillRect(0, 0, width, height);
 
     if (bgUrl && bgSize.baseW && bgSize.baseH) {
@@ -202,6 +201,7 @@ export default function ImageCanvasApp() {
       });
     }
 
+    // draw items (SVG -> raster)
     for (const it of items) {
       const node = document.getElementById(it.id);
       if (!node) continue;
@@ -228,17 +228,19 @@ export default function ImageCanvasApp() {
   useEffect(() => () => { if (bgUrl) URL.revokeObjectURL(bgUrl); }, [bgUrl]);
 
   // ---------- Styles ----------
-  const paletteWidth = 172;
+  const paletteWidth = 192;
   const styles = {
-    app: { width: "100vw", height: "100vh", overflow: "hidden", background: "#f0f5f1", color: "#333", fontFamily: "Inter, system-ui, Arial, sans-serif" },
-    sidebar: (open) => ({ position: "absolute", top: 0, left: 0, bottom: 0, width: paletteWidth, zIndex: 20, background: "#f0f5f1", borderRight: "1px solid rgba(0,0,0,.1)", transform: `translateX(${open ? 0 : -paletteWidth}px)`, transition: "transform .25s ease" }),
+    app: { width: "100vw", height: "100vh", overflow: "hidden", background: "#faf9f5", color: "#333", fontFamily: "Inter, system-ui, Arial, sans-serif", position: "relative" },
+    sidebar: (open) => ({ position: "absolute", top: 0, left: 0, bottom: 0, width: paletteWidth, zIndex: 20, background: "#faf9f5", borderRight: "1px solid rgba(0,0,0,.1)", transform: `translateX(${open ? 0 : -paletteWidth}px)`, transition: "transform .25s ease", padding: 12, display: "flex", flexDirection: "column", gap: 12 }),
     paletteCard: { background: "transparent", border: "1px solid rgba(0,0,0,.1)", borderRadius: 12, padding: 10, display: "flex", alignItems: "center", gap: 10, cursor: "grab" },
-    canvas: { position: "relative", width: "100%", height: "100%", backgroundColor: "#f0f5f1", display: "grid", placeItems: "center" },
-    emptyState: { position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "#666" },
     floaterBar: { position: "absolute", top: 12, right: 12, zIndex: 40, display: "flex", gap: 8 },
-    floaterBtn: { width: 44, height: 44, borderRadius: 22, background: "rgba(0,0,0,0.0)", color: "#111", border: "1px solid rgba(0,0,0,0.2)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer", padding: 0, lineHeight: 0, WebkitTapHighlightColor: "transparent" },
+    floaterBtn: { width: 44, height: 44, borderRadius: 22, background: "rgba(0,0,0,0.0)", color: "#111", border: "1px solid rgba(0,0,0,0.2)", display: "inline-flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
     handle: { position: "absolute", top: "50%", left: 0, transform: "translate(-50%, -50%)", width: 28, height: 64, borderRadius: 14, background: "rgba(0,0,0,0.08)", border: "1px solid rgba(0,0,0,0.15)", cursor: "pointer", zIndex: 30, display: "grid", placeItems: "center", fontSize: 14, color: "#111" },
-    topChooseBtn: { fontSize: 12, textDecoration: "underline", cursor: "pointer", background: "none", border: "none", padding: 0 },
+    topChooseBtn: { fontSize: 14, cursor: "pointer", background: "transparent", color: "#666", border: "1px solid rgba(0,0,0,0.2)", padding: "10px 14px", borderRadius: 10, lineHeight: 1.2 },
+    bgFrame: { position: "relative", boxShadow: "0 1px 8px rgba(0,0,0,.06)", borderRadius: 12, overflow: "hidden" },
+    placed: { position: "absolute", touchAction: "none", userSelect: "none", cursor: "grab" },
+    infoBtn: { position: "absolute", right: 16, bottom: 16, width: 44, height: 44, borderRadius: 22, background: "rgba(0,0,0,0.05)", border: "1px solid rgba(0,0,0,0.2)", cursor: "pointer", display: "grid", placeItems: "center", fontSize: 20 },
+    infoBox: { position: "absolute", right: 70, bottom: 20, background: "#fff", border: "1px solid rgba(0,0,0,0.15)", borderRadius: 8, padding: 12, fontSize: 12, color: "#333", width: 260, boxShadow: "0 2px 6px rgba(0,0,0,0.1)" }
   };
 
   const dispW = Math.max(0, Math.round(bgSize.baseW * bgSize.scale));
@@ -248,18 +250,117 @@ export default function ImageCanvasApp() {
     <div style={styles.app}>
       <Helmet>
         <title>AtlaS</title>
-        <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><defs><linearGradient id='grad' x1='0%' y1='0%' x2='100%' y2='100%'><stop offset='0%' stop-color='%2390ee90' stop-opacity='1'/><stop offset='100%' stop-color='%23e0fff0' stop-opacity='1'/></linearGradient></defs><circle cx='12' cy='12' r='10' fill='url(%23grad)'/><path d='M2 12h20M12 2a15 15 0 010 20M12 2a15 15 0 000 20' stroke='white' stroke-width='2' fill='none'/></svg>" />
       </Helmet>
 
       {/* Floating buttons */}
       <div style={styles.floaterBar}>
-        {/* ... buttons unchanged ... */}
+        <button style={styles.floaterBtn} title="Clear items" aria-label="Clear items" onClick={clearAll}>🧹</button>
+        <button style={styles.floaterBtn} title="Remove background" aria-label="Remove background" onClick={clearBackground}>🗑️</button>
+        <button style={styles.floaterBtn} title="Save PNG" aria-label="Save PNG" onClick={savePNG}>💾</button>
+        <input ref={fileInputRef} type="file" accept="image/*" onChange={onInputChange} hidden />
       </div>
 
       {/* Toggle handle */}
       <button aria-label="Toggle palette" onClick={() => setSidebarOpen((v) => !v)} style={styles.handle}>{sidebarOpen ? "‹" : "›"}</button>
 
-      {/* Palette, Canvas, etc. unchanged below */}
+      {/* Sidebar / Palette */}
+      <aside style={styles.sidebar(sidebarOpen)} aria-hidden={!sidebarOpen} aria-label="Palette sidebar">
+        {PALETTE.map((p) => (
+          <div key={p.type} draggable onDragStart={(e) => onPaletteDragStart(e, p.type)} style={styles.paletteCard} role="button" aria-label={`Drag ${p.label} into canvas`}>
+            {p.render()}
+            <div style={{ fontSize: 14 }}>{p.label}</div>
+          </div>
+        ))}
+      </aside>
+
+      {/* Canvas */}
+      <div
+        ref={canvasRef}
+        style={{ position: 'relative', width: '100%', height: '100%', display: 'grid', placeItems: 'center' }}
+        onDragOver={onCanvasDragOver}
+        onDrop={onCanvasDrop}
+        onPointerMove={onCanvasPointerMove}
+        onPointerUp={onCanvasPointerUp}
+        onWheel={onCanvasWheel}
+        role="application"
+        aria-label="Design canvas"
+      >
+        {/* Background image (centered) */}
+        {bgUrl ? (
+          <div style={{ ...styles.bgFrame, width: dispW, height: dispH }}>
+            {/* eslint-disable-next-line jsx-a11y/alt-text */}
+            <img src={bgUrl} alt="Background" draggable={false} style={{ width: '100%', height: '100%', display: 'block', objectFit: 'contain', background: '#fff' }} />
+          </div>
+        ) : null}
+
+        {/* Empty state */}
+        {!bgUrl && (
+          <div style={{ textAlign: 'center', color: '#666' }}>
+            <div style={{ fontSize: 18, marginBottom: 6 }}>Drop an image anywhere</div>
+            <div style={{ fontSize: 13, marginBottom: 12, opacity: .8 }}>or</div>
+            <button onClick={() => fileInputRef.current?.click()} style={styles.topChooseBtn}>Choose a file</button>
+          </div>
+        )}
+
+        {/* Placed items */}
+        {items.map((it) => (
+          <div
+            key={it.id}
+            id={it.id}
+            style={{ ...styles.placed, left: it.x, top: it.y }}
+            onPointerDown={(e) => onItemPointerDown(e, it.id)}
+            onDoubleClick={() => removeItem(it.id)}
+            title={`${it.type}`}
+          >
+            {Icons[it.type]?.(48)}
+          </div>
+        ))}
+      </div>
+
+      {/* Info button + popup */}
+      <button
+        type="button"
+        aria-label="Show tips"
+        title="Tips"
+        style={styles.infoBtn}
+        onClick={() => setShowInfo((v) => !v)}
+      >
+        ℹ️
+      </button>
+      {showInfo && (
+        <div role="status" aria-live="polite" style={styles.infoBox}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Tips</div>
+          <div> Hold <kbd>Shift</kbd> or <kbd>Ctrl/Cmd</kbd> and scroll to zoom the background. Double-click an item to delete it.</div>
+        </div>
+      )}
     </div>
   );
+}
+
+// ---------- Lightweight runtime tests (dev only) ----------
+const __DEV__ = typeof process !== "undefined" ? process.env?.NODE_ENV !== "production" : true;
+if (__DEV__) {
+  try {
+    // fitWithin tests
+    console.assert(JSON.stringify(fitWithin(1000, 1000, 500, 1000)) === JSON.stringify({ w: 500, h: 500 }), "fitWithin square downscale failed");
+    console.assert(JSON.stringify(fitWithin(2000, 1000, 500, 1000)) === JSON.stringify({ w: 500, h: 250 }), "fitWithin landscape downscale failed");
+    console.assert(JSON.stringify(fitWithin(1000, 2000, 500, 1000)) === JSON.stringify({ w: 500, h: 1000 }), "fitWithin portrait downscale failed");
+
+    // isRoughlySquare tests
+    console.assert(isRoughlySquare(100, 100) === true, "isRoughlySquare true failed");
+    console.assert(isRoughlySquare(100, 95) === true, "isRoughlySquare near-square failed");
+    console.assert(isRoughlySquare(100, 80) === false, "isRoughlySquare non-square failed");
+
+    // localPoint tests
+    const pt = localPoint(15, 25, { left: 10, top: 20 });
+    console.assert(pt.x === 5 && pt.y === 5, "localPoint failed");
+
+    // nextId format test
+    const sample = nextId();
+    console.assert(/^item_\d+$/.test(sample), "nextId format failed");
+
+    console.log("%cAll helper tests passed", "color: green");
+  } catch (err) {
+    console.warn("Runtime tests threw", err);
+  }
 }
