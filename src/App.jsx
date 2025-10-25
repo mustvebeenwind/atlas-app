@@ -12,7 +12,16 @@ import React, { useRef, useState, useEffect } from "react";
  *  - Icons centered in buttons/cards; hidden palette; relative positioning vs reference frame (bg or full canvas)
  *  - Save as image: exports exact composition; crops to bg with transparent outside when bg present
  *  - Double-click item to delete; zoom with Shift/Ctrl + wheel
- *  - Robust, *non-throwing* runtime tests that only run when the DOM is truly ready
+ *  - Robust, non-throwing runtime tests that only run when the DOM is truly ready
+ *
+ * Patches applied:
+ *  - HiDPI export via devicePixelRatio
+ *  - Revoke object URLs to prevent memory leaks
+ *  - Remove redundant state writes on upload (use snapshot only)
+ *  - Stable keyboard listeners (no re-register per history change)
+ *  - Cleaner drag ghost + left-button guard
+ *  - Soft snapping while dragging (10x10 grid, tolerant)
+ *  - ARIA tweaks and mobile-friendly Zoom +/- controls
  */
 
 // ---------- Helpers ----------
@@ -25,13 +34,19 @@ function isRoughlySquare(w, h) {
   if (!w || !h) return false;
   const r = w / h; return r > 0.9 && r < 1.1;
 }
+const deepClone = (v) => (typeof structuredClone === 'function' ? structuredClone(v) : JSON.parse(JSON.stringify(v)));
+function softSnap01(v, grid = 10, tol = 0.02) {
+  const g = 1 / grid;
+  const snapped = Math.round(v / g) * g;
+  return Math.abs(snapped - v) <= tol ? snapped : v;
+}
 
 // ---------- Icons ----------
 const stroke = "#333";
 const common = { fill: "none", stroke, strokeWidth: 1.5, strokeLinecap: "round", strokeLinejoin: "round" };
 const Icons = {
   bed: (size = 48) => (
-    <svg width={size} height={size} viewBox="0 0 64 64" aria-hidden>
+    <svg width={size} height={size} viewBox="0 0 64 64" role="img" aria-label="bed">
       <rect x="6" y="30" width="52" height="18" rx="3" {...common} />
       <rect x="10" y="24" width="22" height="10" rx="2" {...common} />
       <line x1="6" y1="48" x2="6" y2="54" {...common} />
@@ -39,20 +54,20 @@ const Icons = {
     </svg>
   ),
   door: (size = 48) => (
-    <svg width={size} height={size} viewBox="0 0 64 64" aria-hidden>
+    <svg width={size} height={size} viewBox="0 0 64 64" role="img" aria-label="door">
       <rect x="18" y="6" width="28" height="52" rx="2" {...common} />
       <circle cx="40" cy="32" r="2.5" stroke={stroke} fill={stroke} />
     </svg>
   ),
   table: (size = 48) => (
-    <svg width={size} height={size} viewBox="0 0 64 64" aria-hidden>
+    <svg width={size} height={size} viewBox="0 0 64 64" role="img" aria-label="table">
       <rect x="10" y="22" width="44" height="8" rx="2" {...common} />
       <line x1="18" y1="30" x2="18" y2="50" {...common} />
       <line x1="46" y1="30" x2="46" y2="50" {...common} />
     </svg>
   ),
   chair: (size = 48) => (
-    <svg width={size} height={size} viewBox="0 0 64 64" aria-hidden>
+    <svg width={size} height={size} viewBox="0 0 64 64" role="img" aria-label="chair">
       <rect x="22" y="14" width="20" height="14" rx="2" {...common} />
       <rect x="22" y="28" width="20" height="8" rx="2" {...common} />
       <line x1="24" y1="36" x2="24" y2="50" {...common} />
@@ -72,6 +87,7 @@ const nextId = () => `item_${idCounter++}`;
 
 export default function ImageCanvasApp() {
   const [bgUrl, setBgUrl] = useState(null);
+  const lastBgUrlRef = useRef(null);
   const [bgSize, setBgSize] = useState({ baseW: 0, baseH: 0, naturalW: 0, naturalH: 0, scale: 1 });
   const [items, setItems] = useState([]); // {id, type, fx, fy}
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -104,7 +120,7 @@ export default function ImageCanvasApp() {
     setHistory((prev) => {
       const trimmed = prev.slice(0, hIndex + 1);
       const snap = {
-        items: structuredClone ? structuredClone(nextItems) : JSON.parse(JSON.stringify(nextItems)),
+        items: deepClone(nextItems),
         bgUrl: nextBgUrl,
         bgSize: { ...nextBgSize },
       };
@@ -152,9 +168,12 @@ export default function ImageCanvasApp() {
         let baseW = 0, baseH = 0;
         if (isRoughlySquare(naturalW, naturalH)) { baseW = 300; baseH = 300; }
         else { const bounded = fitWithin(naturalW, naturalH, 500, 1000); baseW = bounded.w; baseH = bounded.h; }
-        setBgUrl(url);
-        setBgSize({ baseW, baseH, naturalW, naturalH, scale: 1 });
-        // snapshot background change into history
+        // revoke previous URL if any
+        if (lastBgUrlRef.current && lastBgUrlRef.current !== url) {
+          try { URL.revokeObjectURL(lastBgUrlRef.current); } catch {}
+        }
+        lastBgUrlRef.current = url;
+        // snapshot background change into history (single source of truth)
         snapshotState(items, url, { baseW, baseH, naturalW, naturalH, scale: 1 });
       };
       img.src = url;
@@ -172,6 +191,10 @@ export default function ImageCanvasApp() {
     if (!e?.dataTransfer) return;
     e.dataTransfer.setData("text/plain", type);
     e.dataTransfer.effectAllowed = "copy";
+    // tiny transparent drag image so OS ghost doesn't occlude
+    const gi = document.createElement('canvas');
+    gi.width = gi.height = 1;
+    e.dataTransfer.setDragImage?.(gi, 0, 0);
   }
   function onCanvasDragOver(e) { e?.preventDefault?.(); }
   function dropOnCanvas(clientX, clientY, type) {
@@ -194,6 +217,7 @@ export default function ImageCanvasApp() {
 
   // ---------- Drag placed items (update fractions) ----------
   function onItemPointerDown(e, id) {
+    if (e.button !== 0) return; // left button only
     const { dx, dy, left, top, refW, refH } = getRefFrame();
     const item = items.find((it) => it.id === id);
     if (!item || refW === 0 || refH === 0) return;
@@ -202,7 +226,7 @@ export default function ImageCanvasApp() {
     const fx = Math.max(0, Math.min(1, px / refW));
     const fy = Math.max(0, Math.min(1, py / refH));
     draggingRef.current = { id, offsetFx: fx - (item.fx ?? 0), offsetFy: fy - (item.fy ?? 0) };
-    dragStartSnapshotRef.current = (structuredClone ? structuredClone(items) : JSON.parse(JSON.stringify(items)));
+    dragStartSnapshotRef.current = deepClone(items);
     e.currentTarget?.setPointerCapture?.(e.pointerId);
   }
   function onCanvasPointerMove(e) {
@@ -215,7 +239,11 @@ export default function ImageCanvasApp() {
     const fy = Math.max(0, Math.min(1, py / refH)) - drag.offsetFy;
     const clampedFx = Math.max(0, Math.min(1, fx));
     const clampedFy = Math.max(0, Math.min(1, fy));
-    setItems((prev) => prev.map((it) => (it.id === drag.id ? { ...it, fx: clampedFx, fy: clampedFy } : it)));
+    setItems((prev) =>
+      prev.map((it) =>
+        it.id === drag.id ? { ...it, fx: softSnap01(clampedFx), fy: softSnap01(clampedFy) } : it
+      )
+    );
   }
   function onCanvasPointerUp() {
     const drag = draggingRef.current;
@@ -237,12 +265,22 @@ export default function ImageCanvasApp() {
   }
   function onCanvasWheel(e) {
     if (!bgUrl) return;
-    if (!(e.shiftKey || e.ctrlKey)) return;
+    if (!(e.shiftKey || e.ctrlKey)) return; // desktop/hardware keyboards
     e.preventDefault();
     setBgSize((s) => {
       const dir = e.deltaY < 0 ? 1 : -1;
       const step = e.shiftKey && e.ctrlKey ? 0.15 : 0.1;
       const nextScale = Math.min(5, Math.max(0.2, s.scale * (1 + dir * step)));
+      const next = { ...s, scale: nextScale };
+      scheduleBgSnapshot(next);
+      return next;
+    });
+  }
+  // Mobile-friendly zoom buttons
+  function nudgeZoom(mult) {
+    if (!bgUrl) return;
+    setBgSize((s) => {
+      const nextScale = Math.min(5, Math.max(0.2, s.scale * mult));
       const next = { ...s, scale: nextScale };
       scheduleBgSnapshot(next);
       return next;
@@ -254,6 +292,7 @@ export default function ImageCanvasApp() {
   function removeItem(id) { snapshotState(items.filter((it) => it.id !== id)); }
   function clearBackground() {
     const reset = { baseW: 0, baseH: 0, naturalW: 0, naturalH: 0, scale: 1 };
+    if (lastBgUrlRef.current) { try { URL.revokeObjectURL(lastBgUrlRef.current); } catch {} lastBgUrlRef.current = null; }
     snapshotState(items, null, reset);
   }
 
@@ -265,9 +304,14 @@ export default function ImageCanvasApp() {
       const outW = exportOnlyBgArea ? Math.round(dispW) : Math.max(1, Math.floor(canvasRef.current.getBoundingClientRect().width));
       const outH = exportOnlyBgArea ? Math.round(dispH) : Math.max(1, Math.floor(canvasRef.current.getBoundingClientRect().height));
       const canvas = document.createElement('canvas');
-      canvas.width = outW; canvas.height = outH;
+      const dpr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
+      canvas.width = outW * dpr;
+      canvas.height = outH * dpr;
+      canvas.style.width = `${outW}px`;
+      canvas.style.height = `${outH}px`;
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
+      ctx.scale(dpr, dpr);
       if (!exportOnlyBgArea) { ctx.fillStyle = '#faf9f5'; ctx.fillRect(0, 0, outW, outH); }
       if (bgUrl && dispW > 0 && dispH > 0) {
         await new Promise((resolve) => {
@@ -307,7 +351,7 @@ export default function ImageCanvasApp() {
     const newIdx = hIndex - 1;
     setHIndex(newIdx);
     const snap = history[newIdx];
-    setItems(structuredClone ? structuredClone(snap.items) : JSON.parse(JSON.stringify(snap.items)));
+    setItems(deepClone(snap.items));
     setBgUrl(snap.bgUrl);
     setBgSize({ ...snap.bgSize });
   }
@@ -316,23 +360,27 @@ export default function ImageCanvasApp() {
     const newIdx = hIndex + 1;
     setHIndex(newIdx);
     const snap = history[newIdx];
-    setItems(structuredClone ? structuredClone(snap.items) : JSON.parse(JSON.stringify(snap.items)));
+    setItems(deepClone(snap.items));
     setBgUrl(snap.bgUrl);
     setBgSize({ ...snap.bgSize });
   }
 
-  // Keyboard shortcuts for Undo/Redo
+  // Keyboard shortcuts for Undo/Redo – stable
+  const undoRef = useRef(undo);
+  const redoRef = useRef(redo);
+  useEffect(() => { undoRef.current = undo; redoRef.current = redo; });
   useEffect(() => {
     function onKeyDown(e) {
       const mod = e.ctrlKey || e.metaKey;
       if (!mod) return;
-      if (e.key.toLowerCase() === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
-      else if (e.key.toLowerCase() === 'z' && e.shiftKey) { e.preventDefault(); redo(); }
-      else if (e.key.toLowerCase() === 'y') { e.preventDefault(); redo(); }
+      const k = e.key.toLowerCase();
+      if (k === 'z' && !e.shiftKey) { e.preventDefault(); undoRef.current(); }
+      else if (k === 'z' && e.shiftKey) { e.preventDefault(); redoRef.current(); }
+      else if (k === 'y') { e.preventDefault(); redoRef.current(); }
     }
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [hIndex, history]);
+  }, []);
 
   // Rerender on resize (macOS fullscreen etc.)
   useEffect(() => {
@@ -421,9 +469,11 @@ export default function ImageCanvasApp() {
     <div style={styles.app} data-resize-tick={resizeTick}>
       {/* Toolbar */}
       <div style={styles.floaterBar}>
-        <button style={styles.floaterBtn} title="Save as image" onClick={saveCompositionImage}>⬇️</button>
-        <button style={styles.floaterBtn} title="Clear items" onClick={clearAll}>🧹</button>
-        <button style={styles.floaterBtn} title="Remove background" onClick={clearBackground}>🗑️</button>
+        <button aria-label="Save as image" style={styles.floaterBtn} title="Save as image" onClick={saveCompositionImage}>⬇️</button>
+        <button aria-label="Zoom out" style={styles.floaterBtn} title="Zoom out" onClick={() => nudgeZoom(1/1.1)}>−</button>
+        <button aria-label="Zoom in" style={styles.floaterBtn} title="Zoom in" onClick={() => nudgeZoom(1.1)}>＋</button>
+        <button aria-label="Clear items" style={styles.floaterBtn} title="Clear items" onClick={clearAll}>🧹</button>
+        <button aria-label="Remove background" style={styles.floaterBtn} title="Remove background" onClick={clearBackground}>🗑️</button>
         {/* Hidden input used by the empty-state "Choose a file" */}
         <input ref={fileInputRef} type="file" accept="image/*" onChange={onInputChange} hidden />
       </div>
@@ -434,7 +484,7 @@ export default function ImageCanvasApp() {
       {/* Sidebar / Palette */}
       <aside style={styles.sidebar(sidebarOpen)} aria-hidden={!sidebarOpen}>
         {PALETTE.map((p) => (
-          <div key={p.type} draggable onDragStart={(e) => onPaletteDragStart(e, p.type)} style={styles.paletteCard}>
+          <div key={p.type} draggable onDragStart={(e) => onPaletteDragStart(e, p.type)} style={styles.paletteCard} title={`Drag ${p.label}`}>
             {p.render()}
             <div style={{ fontSize: 14 }}>{p.label}</div>
           </div>
@@ -474,6 +524,8 @@ export default function ImageCanvasApp() {
               onPointerDown={(e) => onItemPointerDown(e, it.id)}
               onDoubleClick={() => removeItem(it.id)}
               title={`${it.type}`}
+              role="img"
+              aria-label={it.type}
             >
               {Icons[it.type]?.(48)}
             </div>
@@ -483,16 +535,16 @@ export default function ImageCanvasApp() {
 
       {/* Undo / Redo (bottom center) */}
       <div style={styles.undoRedoBar}>
-        <button style={styles.undoRedoBtn(canUndo)} onClick={undo} disabled={!canUndo} title="Undo (Ctrl/⌘+Z)">↩︎ Undo</button>
-        <button style={styles.undoRedoBtn(canRedo)} onClick={redo} disabled={!canRedo} title="Redo (Ctrl/⌘+Y or Shift+Ctrl/⌘+Z)">Redo ↪︎</button>
+        <button aria-label="Undo" style={styles.undoRedoBtn(canUndo)} onClick={undo} disabled={!canUndo} title="Undo (Ctrl/⌘+Z)">↩︎ Undo</button>
+        <button aria-label="Redo" style={styles.undoRedoBtn(canRedo)} onClick={redo} disabled={!canRedo} title="Redo (Ctrl/⌘+Y or Shift+Ctrl/⌘+Z)">Redo ↪︎</button>
       </div>
 
       {/* Info button + popup */}
-      <button type="button" style={styles.infoBtn} onClick={() => setShowInfo(v => !v)}>ℹ️</button>
+      <button type="button" aria-label="Show tips" style={styles.infoBtn} onClick={() => setShowInfo(v => !v)}>ℹ️</button>
       {showInfo && (
         <div style={styles.infoBox}>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Tips</div>
-          <div>Hold <kbd>Shift</kbd> or <kbd>Ctrl/Cmd</kbd> and scroll to zoom the background. Double-click an item to delete it.</div>
+          <div>On desktop, hold <kbd>Shift</kbd> or <kbd>Ctrl/Cmd</kbd> and scroll to zoom the background. On touch devices, use the ＋/− buttons. Double‑click an item to delete it.</div>
         </div>
       )}
     </div>
