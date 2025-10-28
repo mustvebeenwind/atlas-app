@@ -1,24 +1,24 @@
 import React, { useRef, useState, useEffect } from "react";
 
 /**
- * AtlaS – React Image Canvas (pure JSX, no TypeScript)
+ * AtlaS – React Image Canvas (pure JSX)
  * • Walls (pink), Windows (green), Floor (dark blue)
  * • Right-center Select menu + Stop selecting (hides 8 handles)
- * • Windows: after placing, show bottom note asking height above ground (default size 40×200 cm)
+ * • Windows: after placing, show bottom note asking height above ground (default 40×200 cm)
+ * • Drag icons from palette, zoom/pan, undo/redo, export PNG
  *
- * Hardened against React error #62 by guarding ALL numbers and replacing deep clone with
- * a sandbox-safe variant that never throws on undefined/non-serializable values.
+ * Hardened to avoid React error #62:
+ *  - Safe deep clone that never throws on non-serializable values
+ *  - Numeric guards so styles never receive NaN/Infinity
  */
 
 // ---------- tiny utils ----------
-const C = (o, p) => Object.assign({}, o, p); // shallow clone + patch
+const merge = (o, p) => ({ ...(o || {}), ...(p || {}) }); // safe shallow merge
 const clamp01 = (n) => Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
-// Deep clone that never throws: handles undefined, functions, and non-serializable values.
+// Deep clone that never throws: handles undefined/functions/non-serializable.
 const clone = (v) => {
-  if (v === undefined) return []; // our callers expect arrays/objects; undefined -> safe empty
-  try {
-    if (typeof structuredClone === "function") return structuredClone(v);
-  } catch {}
+  if (v === undefined) return [];
+  try { if (typeof structuredClone === "function") return structuredClone(v); } catch {}
   try {
     return JSON.parse(
       JSON.stringify(v, (_k, val) => (typeof val === "function" || val === undefined ? null : val))
@@ -29,37 +29,18 @@ const clone = (v) => {
     return v;
   }
 };
-const num = (v, d = 0) => {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : d;
-};
-const round = (v, d = 0) => {
-  const n = Number(v);
-  return Number.isFinite(n) ? Math.round(n) : d;
-};
+const num = (v, d = 0) => (Number.isFinite(Number(v)) ? Number(v) : d);
+const round = (v, d = 0) => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : d);
 
-// Guarded fitWithin & square check (prevents invalid ratios & React #62 scenarios)
 const fitWithin = (w, h, maxW, maxH) => {
   const W = num(w), H = num(h), MW = num(maxW), MH = num(maxH);
-  if (W <= 0 || H <= 0 || MW <= 0 || MH <= 0) {
-    console.warn("fitWithin: invalid input", { w, h, maxW, maxH });
-    return { w: 0, h: 0 };
-  }
+  if (W <= 0 || H <= 0 || MW <= 0 || MH <= 0) { console.warn("fitWithin: invalid", { w, h, maxW, maxH }); return { w: 0, h: 0 }; }
   const r = Math.min(MW / W, MH / H);
   const out = { w: Math.round(W * r), h: Math.round(H * r) };
-  if (!Number.isFinite(out.w) || !Number.isFinite(out.h)) {
-    console.warn("fitWithin: produced non-finite", out);
-    return { w: 0, h: 0 };
-  }
+  if (!Number.isFinite(out.w) || !Number.isFinite(out.h)) return { w: 0, h: 0 };
   return out;
 };
-const isSquareish = (w, h) => {
-  const W = num(w), H = num(h);
-  if (W <= 0 || H <= 0) return false;
-  const r = W / H;
-  return r > 0.9 && r < 1.1;
-};
-
+const isSquareish = (w, h) => { const W = num(w), H = num(h); if (W <= 0 || H <= 0) return false; const r = W / H; return r > 0.9 && r < 1.1; };
 const normRect = (fx0, fy0, fx1, fy1) => {
   const x0 = clamp01(Math.min(fx0, fx1)), y0 = clamp01(Math.min(fy0, fy1));
   const x1 = clamp01(Math.max(fx0, fx1)), y1 = clamp01(Math.max(fy0, fy1));
@@ -104,7 +85,7 @@ const PALETTE = ["bed", "door", "table", "chair"].map((t) => ({ type: t, label: 
 
 let idCounter = 1; const nextId = () => `item_${idCounter++}`;
 
-// ---------- styles (trimmed) ----------
+// ---------- styles (compact) ----------
 const styles = {
   app: { width: "100vw", height: "100vh", background: "#faf9f5", color: "#333", fontFamily: "Inter, system-ui, Arial, sans-serif", position: "relative", userSelect: "none" },
   sidebar: (open) => ({ position: "absolute", top: 0, left: 0, bottom: 0, width: 180, background: "#faf9f5", borderRight: "1px solid rgba(0,0,0,.1)", transform: `translateX(${open ? 0 : -180}px)`, transition: "transform .25s, opacity .2s", padding: 12, display: "flex", flexDirection: "column", gap: 12, zIndex: 20, opacity: open ? 1 : 0, pointerEvents: open ? "auto" : "none" }),
@@ -136,11 +117,7 @@ const COLORS = {
   floor: { fill: "rgba(10,40,160,0.35)", stroke: "rgba(10,40,160,0.9)" },
 };
 
-const getCanvasRect = (el) => {
-  if (!el) return { left: 0, top: 0, width: 0, height: 0 };
-  const r = el.getBoundingClientRect();
-  return { left: r.left, top: r.top, width: r.width, height: r.height };
-};
+const getCanvasRect = (el) => { if (!el) return { left: 0, top: 0, width: 0, height: 0 }; const r = el.getBoundingClientRect(); return { left: r.left, top: r.top, width: r.width, height: r.height }; };
 
 export default function ImageCanvasApp() {
   // pan/zoom + BG
@@ -200,71 +177,19 @@ export default function ImageCanvasApp() {
   ) => {
     setHistory((prev) => {
       const trimmed = prev.slice(0, hIndex + 1);
-      const snap = {
-        items: clone(nextItems),
-        walls: clone(nextWalls),
-        windows: clone(nextWindows),
-        floors: clone(nextFloors),
-        bgUrl: nextBgUrl,
-        bgSize: { ...nextBgSize },
-      };
-      const newHist = [...trimmed, snap];
-      setHIndex(newHist.length - 1);
-      return newHist;
+      const snap = { items: clone(nextItems), walls: clone(nextWalls), windows: clone(nextWindows), floors: clone(nextFloors), bgUrl: nextBgUrl, bgSize: { ...nextBgSize } };
+      const newHist = [...trimmed, snap]; setHIndex(newHist.length - 1); return newHist;
     });
-    setItems(nextItems);
-    setWalls(nextWalls);
-    setWindows(nextWindows);
-    setFloors(nextFloors);
-    setBgUrl(nextBgUrl);
-    setBgSize(nextBgSize);
+    setItems(nextItems); setWalls(nextWalls); setWindows(nextWindows); setFloors(nextFloors); setBgUrl(nextBgUrl); setBgSize(nextBgSize);
   };
   const snapshotItems = (next) => snapshotState(next, bgUrl, bgSize, walls, windows, floors);
-  const snapshotLayer = (k, next) => {
-    if (k === 'wall') snapshotState(items, bgUrl, bgSize, next, windows, floors);
-    else if (k === 'window') snapshotState(items, bgUrl, bgSize, walls, next, floors);
-    else snapshotState(items, bgUrl, bgSize, walls, windows, next);
-  };
+  const snapshotLayer = (k, next) => { if (k === 'wall') snapshotState(items, bgUrl, bgSize, next, windows, floors); else if (k === 'window') snapshotState(items, bgUrl, bgSize, walls, next, floors); else snapshotState(items, bgUrl, bgSize, walls, windows, next); };
 
   // frames
-  const getDisplayDims = () => ({
-    dispW: Math.max(0, round(num(bgSize.baseW) * num(bgSize.scale, 1))),
-    dispH: Math.max(0, round(num(bgSize.baseH) * num(bgSize.scale, 1)))
-  });
-  const getBgFrame = () => {
-    const el = canvasRef.current;
-    const { width: cw, height: ch, left, top } = getCanvasRect(el);
-    const { dispW, dispH } = getDisplayDims();
-    const dx = Math.floor((cw - dispW) / 2) + Math.round(num(bgPan.x));
-    const dy = Math.floor((ch - dispH) / 2) + Math.round(num(bgPan.y));
-    return { dx, dy, left, top, cw, ch, dispW, dispH };
-  };
-  const getRefFrame = () => {
-    const f = getBgFrame();
-    return {
-      dx: 0,
-      dy: 0,
-      left: f.left,
-      top: f.top,
-      refW: f.cw,
-      refH: f.ch,
-      cw: f.cw,
-      ch: f.ch,
-      bgDx: f.dx,
-      bgDy: f.dy,
-      dispW: f.dispW,
-      dispH: f.dispH,
-    };
-  };
-  const getRel = (x, y) => {
-    const { dx, dy, left, top, refW, refH } = getRefFrame();
-    return {
-      fx: clamp01((x - (left + dx)) / (refW || 1)),
-      fy: clamp01((y - (top + dy)) / (refH || 1)),
-      refW,
-      refH,
-    };
-  };
+  const getDisplayDims = () => ({ dispW: Math.max(0, round(num(bgSize.baseW) * num(bgSize.scale, 1))), dispH: Math.max(0, round(num(bgSize.baseH) * num(bgSize.scale, 1))) });
+  const getBgFrame = () => { const el = canvasRef.current; const { width: cw, height: ch, left, top } = getCanvasRect(el); const { dispW, dispH } = getDisplayDims(); const dx = Math.floor((cw - dispW) / 2) + Math.round(num(bgPan.x)); const dy = Math.floor((ch - dispH) / 2) + Math.round(num(bgPan.y)); return { dx, dy, left, top, cw, ch, dispW, dispH }; };
+  const getRefFrame = () => { const f = getBgFrame(); return { dx: 0, dy: 0, left: f.left, top: f.top, refW: f.cw, refH: f.ch, cw: f.cw, ch: f.ch, bgDx: f.dx, bgDy: f.dy, dispW: f.dispW, dispH: f.dispH }; };
+  const getRel = (x, y) => { const { dx, dy, left, top, refW, refH } = getRefFrame(); return { fx: clamp01((x - (left + dx)) / (refW || 1)), fy: clamp01((y - (top + dy)) / (refH || 1)), refW, refH }; };
 
   // upload
   const onFile = (file) => {
@@ -274,86 +199,26 @@ export default function ImageCanvasApp() {
       const img = new Image();
       img.onload = () => {
         const naturalW = num(img.width), naturalH = num(img.height);
-        const base = isSquareish(naturalW, naturalH)
-          ? { w: 300, h: 300 }
-          : fitWithin(naturalW, naturalH, 500, 1000);
-        const baseW = base.w > 0 ? base.w : 300; // safe fallback
-        const baseH = base.h > 0 ? base.h : 300;
-        if (lastBgUrlRef.current && lastBgUrlRef.current !== url) {
-          try { URL.revokeObjectURL(lastBgUrlRef.current); } catch {}
-        }
+        const base = isSquareish(naturalW, naturalH) ? { w: 300, h: 300 } : fitWithin(naturalW, naturalH, 500, 1000);
+        const baseW = base.w > 0 ? base.w : 300; const baseH = base.h > 0 ? base.h : 300;
+        if (lastBgUrlRef.current && lastBgUrlRef.current !== url) { try { URL.revokeObjectURL(lastBgUrlRef.current); } catch {} }
         lastBgUrlRef.current = url;
-        snapshotState(
-          items,
-          url,
-          { baseW, baseH, naturalW, naturalH, scale: 1 },
-          walls,
-          windows,
-          floors
-        );
+        snapshotState(items, url, { baseW, baseH, naturalW, naturalH, scale: 1 }, walls, windows, floors);
       };
       img.src = url;
     } catch {}
   };
-  const onInputChange = (e) => {
-    const f = e?.target?.files?.[0];
-    if (!f) return;
-    onFile(f);
-    try { e.target.value = ""; } catch {}
-  };
+  const onInputChange = (e) => { const f = e?.target?.files?.[0]; if (!f) return; onFile(f); try { e.target.value = ""; } catch {} };
 
   // DnD (palette → canvas)
-  const onPaletteDragStart = (e, type) => {
-    if (!e?.dataTransfer) return;
-    try { e.dataTransfer.setData("text/plain", type); e.dataTransfer.setData("text", type); } catch {}
-    e.dataTransfer.effectAllowed = "copyMove";
-    if (e.dataTransfer.setDragImage && e.currentTarget) {
-      try {
-        e.dataTransfer.setDragImage(
-          e.currentTarget,
-          e.currentTarget.clientWidth / 2,
-          e.currentTarget.clientHeight / 2
-        );
-      } catch {}
-    }
-  };
+  const onPaletteDragStart = (e, type) => { if (!e?.dataTransfer) return; try { e.dataTransfer.setData("text/plain", type); e.dataTransfer.setData("text", type); } catch {} e.dataTransfer.effectAllowed = "copyMove"; if (e.dataTransfer.setDragImage && e.currentTarget) { try { e.dataTransfer.setDragImage(e.currentTarget, e.currentTarget.clientWidth / 2, e.currentTarget.clientHeight / 2); } catch {} } };
   const onCanvasDragOver = (e) => { if (!e) return; e.preventDefault(); try { if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; } catch {} };
-  const dropOnCanvas = (x, y, type) => {
-    const { fx, fy } = getRel(x, y);
-    snapshotItems([...items, { id: nextId(), type, fx, fy, size: 48 }]);
-  };
-  const onCanvasDrop = (e) => {
-    e.preventDefault();
-    const dt = e.dataTransfer;
-    if (dt?.files?.length > 0) {
-      const f = dt.files[0];
-      if (f?.type?.startsWith("image/")) onFile(f);
-      return;
-    }
-    const type = dt.getData("text/plain") || dt.getData("text");
-    if (type) dropOnCanvas(e.clientX, e.clientY, type);
-  };
+  const dropOnCanvas = (x, y, type) => { const { fx, fy } = getRel(x, y); snapshotItems([...items, { id: nextId(), type, fx, fy, size: 48 }]); };
+  const onCanvasDrop = (e) => { e.preventDefault(); const dt = e.dataTransfer; if (dt?.files?.length > 0) { const f = dt.files[0]; if (f?.type?.startsWith("image/")) onFile(f); return; } const type = dt.getData("text/plain") || dt.getData("text"); if (type) dropOnCanvas(e.clientX, e.clientY, type); };
 
   // items drag/resize
-  const onItemPointerDown = (e, id) => {
-    if (e.button !== 0) return;
-    e.stopPropagation();
-    const { fx, fy } = getRel(e.clientX, e.clientY);
-    const it = items.find((x) => x.id === id);
-    if (!it) return;
-    draggingRef.current = { id, offsetFx: fx - (it.fx || 0), offsetFy: fy - (it.fy || 0) };
-    dragStartSnapshotRef.current = clone(items);
-    e.currentTarget?.setPointerCapture?.(e.pointerId);
-  };
-  const onItemResizePointerDown = (e, id) => {
-    if (e.button !== 0) return;
-    e.stopPropagation();
-    const it = items.find((x) => x.id === id);
-    if (!it) return;
-    resizingRef.current = { id, startSize: Math.max(16, it.size || 48), startX: e.clientX, startY: e.clientY };
-    dragStartSnapshotRef.current = clone(items);
-    e.currentTarget?.setPointerCapture?.(e.pointerId);
-  };
+  const onItemPointerDown = (e, id) => { if (e.button !== 0) return; e.stopPropagation(); const { fx, fy } = getRel(e.clientX, e.clientY); const it = items.find((x) => x.id === id); if (!it) return; draggingRef.current = { id, offsetFx: fx - (it.fx || 0), offsetFy: fy - (it.fy || 0) }; dragStartSnapshotRef.current = clone(items); e.currentTarget?.setPointerCapture?.(e.pointerId); };
+  const onItemResizePointerDown = (e, id) => { if (e.button !== 0) return; e.stopPropagation(); const it = items.find((x) => x.id === id); if (!it) return; resizingRef.current = { id, startSize: Math.max(16, it.size || 48), startX: e.clientX, startY: e.clientY }; dragStartSnapshotRef.current = clone(items); e.currentTarget?.setPointerCapture?.(e.pointerId); };
 
   // layer utils
   const getLayer = (k) => (k === 'wall' ? walls : k === 'window' ? windows : floors);
@@ -382,22 +247,8 @@ export default function ImageCanvasApp() {
   };
 
   // drag/resize rectangles
-  const onShapeBodyPointerDown = (e, k, id) => {
-    if (e.button !== 0) return;
-    const { fx, fy } = getRel(e.clientX, e.clientY);
-    const r = getLayer(k).find((x) => x.id === id);
-    if (!r) return;
-    shapeDraggingRef.current = { kind: k, id, offsetFx: fx - (r.fx || 0), offsetFy: fy - (r.fy || 0), fw: r.fw || 0, fh: r.fh || 0, start: clone(getLayer(k)) };
-    e.currentTarget?.setPointerCapture?.(e.pointerId);
-  };
-  const onShapeHandlePointerDown = (e, k, id, handle) => {
-    if (!selecting) return;
-    e.stopPropagation();
-    const r = getLayer(k).find((x) => x.id === id);
-    if (!r) return;
-    shapeResizingRef.current = { kind: k, id, handle, start: { ...r }, startLayer: clone(getLayer(k)) };
-    e.currentTarget?.setPointerCapture?.(e.pointerId);
-  };
+  const onShapeBodyPointerDown = (e, k, id) => { if (e.button !== 0) return; const { fx, fy } = getRel(e.clientX, e.clientY); const r = getLayer(k).find((x) => x.id === id); if (!r) return; shapeDraggingRef.current = { kind: k, id, offsetFx: fx - (r.fx || 0), offsetFy: fy - (r.fy || 0), fw: r.fw || 0, fh: r.fh || 0, start: clone(getLayer(k)) }; e.currentTarget?.setPointerCapture?.(e.pointerId); };
+  const onShapeHandlePointerDown = (e, k, id, handle) => { if (!selecting) return; e.stopPropagation(); const r = getLayer(k).find((x) => x.id === id); if (!r) return; shapeResizingRef.current = { kind: k, id, handle, start: { ...r }, startLayer: clone(getLayer(k)) }; e.currentTarget?.setPointerCapture?.(e.pointerId); };
 
   // pointer move / pan / pinch
   const MIN_SIDE = 0.005;
@@ -412,38 +263,26 @@ export default function ImageCanvasApp() {
       if (R - L < MIN_SIDE) { if (rs.handle.includes('w')) L = R - MIN_SIDE; else R = L + MIN_SIDE; }
       if (B - T < MIN_SIDE) { if (rs.handle.includes('n')) T = B - MIN_SIDE; else B = T + MIN_SIDE; }
       const nxt = { fx: Math.min(L, R), fy: Math.min(T, B), fw: Math.abs(R - L), fh: Math.abs(B - T) };
-      setLayer(rs.kind, (prev) => prev.map((r) => (r.id === rs.id ? C(r, nxt) : r))); return;
+      setLayer(rs.kind, (prev) => prev.map((r) => (r.id === rs.id ? merge(r, nxt) : r))); return;
     }
     // item resize
-    const rsz = resizingRef.current; if (rsz.id) { const it = items.find((i) => i.id === rsz.id); if (!it) return; const d = Math.max(e.clientX - rsz.startX, e.clientY - rsz.startY); const size = Math.max(16, Math.min(256, Math.round(num(rsz.startSize || 48) + d))); setItems((p) => p.map((x) => (x.id === rsz.id ? C(x, { size }) : x))); return; }
+    const rsz = resizingRef.current; if (rsz.id) { const it = items.find((i) => i.id === rsz.id); if (!it) return; const d = Math.max(e.clientX - rsz.startX, e.clientY - rsz.startY); const size = Math.max(16, Math.min(256, Math.round(num(rsz.startSize || 48) + d))); setItems((p) => p.map((x) => (x.id === rsz.id ? merge(x, { size }) : x))); return; }
     // shape drag
-    const sd = shapeDraggingRef.current; if (sd.id) { const { fx, fy } = getRel(e.clientX, e.clientY); let nx = clamp01(num(fx) - num(sd.offsetFx)), ny = clamp01(num(fy) - num(sd.offsetFy)); nx = Math.max(0, Math.min(1 - num(sd.fw), nx)); ny = Math.max(0, Math.min(1 - num(sd.fh), ny)); setLayer(sd.kind, (p) => p.map((r) => (r.id === sd.id ? C(r, { fx: nx, fy: ny }) : r))); return; }
+    const sd = shapeDraggingRef.current; if (sd.id) { const { fx, fy } = getRel(e.clientX, e.clientY); let nx = clamp01(num(fx) - num(sd.offsetFx)), ny = clamp01(num(fy) - num(sd.offsetFy)); nx = Math.max(0, Math.min(1 - num(sd.fw), nx)); ny = Math.max(0, Math.min(1 - num(sd.fh), ny)); setLayer(sd.kind, (p) => p.map((r) => (r.id === sd.id ? merge(r, { fx: nx, fy: ny }) : r))); return; }
     // item drag
-    const drag = draggingRef.current; if (drag.id) { const { fx, fy } = getRel(e.clientX, e.clientY); setItems((p) => p.map((it) => (it.id === drag.id ? C(it, { fx: clamp01(num(fx) - num(drag.offsetFx)), fy: clamp01(num(fy) - num(drag.offsetFy)) }) : it))); return; }
+    const drag = draggingRef.current; if (drag.id) { const { fx, fy } = getRel(e.clientX, e.clientY); setItems((p) => p.map((it) => (it.id === drag.id ? merge(it, { fx: clamp01(num(fx) - num(drag.offsetFx)), fy: clamp01(num(fy) - num(drag.offsetFy)) }) : it))); return; }
     // draft preview
-    if (activeTool && selecting && draft) { const { fx, fy } = getRel(e.clientX, e.clientY); setDraft((d) => C(d, { end: { fx, fy } })); }
+    if (activeTool && selecting && draft) { const { fx, fy } = getRel(e.clientX, e.clientY); setDraft((d) => merge(d, { end: { fx, fy } })); }
     // pan
     if (panDragRef.current.active) { setBgPan({ x: num(panDragRef.current.origX) + (e.clientX - panDragRef.current.startX), y: num(panDragRef.current.origY) + (e.clientY - panDragRef.current.startY) }); return; }
     // pinch
-    if (e.pointerType === "touch" && pointersRef.current.has(e.pointerId)) {
-      pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
-      if (pointersRef.current.size === 2) {
-        const [p1, p2] = Array.from(pointersRef.current.values()); const midX = (p1.x + p2.x) / 2, midY = (p1.y + p2.y) / 2; const dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
-        if (!onCanvasPointerMove._lastDist) onCanvasPointerMove._lastDist = dist; const factor = dist / onCanvasPointerMove._lastDist;
-        if (factor > 0 && !Number.isNaN(factor)) { applyZoomAt(midX, midY, factor); const prev = onCanvasPointerMove._lastMid || { x: midX, y: midY }; setBgPan((p) => ({ x: p.x + (midX - prev.x), y: p.y + (midY - prev.y) })); onCanvasPointerMove._lastMid = { x: midX, y: midY }; }
-        onCanvasPointerMove._lastDist = dist;
-      }
-    }
+    if (e.pointerType === "touch" && pointersRef.current.has(e.pointerId)) { pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY }); if (pointersRef.current.size === 2) { const [p1, p2] = Array.from(pointersRef.current.values()); const midX = (p1.x + p2.x) / 2, midY = (p1.y + p2.y) / 2; const dist = Math.hypot(p1.x - p2.x, p1.y - p2.y); if (!onCanvasPointerMove._lastDist) onCanvasPointerMove._lastDist = dist; const factor = dist / onCanvasPointerMove._lastDist; if (factor > 0 && !Number.isNaN(factor)) { applyZoomAt(midX, midY, factor); const prev = onCanvasPointerMove._lastMid || { x: midX, y: midY }; setBgPan((p) => ({ x: p.x + (midX - prev.x), y: p.y + (midY - prev.y) })); onCanvasPointerMove._lastMid = { x: midX, y: midY }; } onCanvasPointerMove._lastDist = dist; } }
   };
 
   const onCanvasPointerUp = (e) => {
-    // shape resize
     const rs = shapeResizingRef.current; if (rs.id) { const before = rs.startLayer; shapeResizingRef.current = { kind: null, id: null, handle: null, start: null, startLayer: null }; const after = getLayer(rs.kind); if (before && JSON.stringify(before) !== JSON.stringify(after)) snapshotLayer(rs.kind, after); }
-    // item resize
     const rsz = resizingRef.current; if (rsz.id) { resizingRef.current = { id: null, startSize: 0, startX: 0, startY: 0 }; const before = dragStartSnapshotRef.current || []; if (JSON.stringify(before) !== JSON.stringify(items)) snapshotItems(items); dragStartSnapshotRef.current = null; }
-    // shape drag
     const sd = shapeDraggingRef.current; if (sd.id) { const before = sd.start; shapeDraggingRef.current = { kind: null, id: null, offsetFx: 0, offsetFy: 0, fw: 0, fh: 0, start: null }; const after = getLayer(sd.kind); if (before && JSON.stringify(before) !== JSON.stringify(after)) snapshotLayer(sd.kind, after); }
-    // item drag
     const drag = draggingRef.current; if (drag.id != null) { draggingRef.current = { id: null, offsetFx: 0, offsetFy: 0 }; const before = dragStartSnapshotRef.current || []; if (JSON.stringify(before) !== JSON.stringify(items)) snapshotItems(items); dragStartSnapshotRef.current = null; }
     if (panDragRef.current.active) { panDragRef.current.active = false; scheduleBgSnapshot(); }
     pointersRef.current.delete(e.pointerId); onCanvasPointerMove._lastDist = null; onCanvasPointerMove._lastMid = null;
@@ -454,22 +293,7 @@ export default function ImageCanvasApp() {
 
   // zoom
   const scheduleBgSnapshot = (nextBgSize) => { if (wheelTimerRef.current) clearTimeout(wheelTimerRef.current); wheelTimerRef.current = setTimeout(() => { snapshotState(items, bgUrl, nextBgSize ?? bgSize, walls, windows, floors); }, 300); };
-  const applyZoomAt = (screenX, screenY, factor) => {
-    const f = num(factor, 1);
-    setBgSize((s) => {
-      const nextScale = Math.min(5, Math.max(0.2, num(s.scale, 1) * f));
-      const dispW = num(s.baseW) * num(s.scale, 1), dispH = num(s.baseH) * num(s.scale, 1);
-      const { left, top, width: cw, height: ch } = getCanvasRect(canvasRef.current);
-      const beforeDx = Math.floor((cw - dispW) / 2) + Math.round(num(bgPan.x));
-      const beforeDy = Math.floor((ch - dispH) / 2) + Math.round(num(bgPan.y));
-      const offsetX = screenX - (left + beforeDx), offsetY = screenY - (top + beforeDy);
-      const scaleRatio = nextScale / num(s.scale, 1);
-      setBgPan((p) => ({ x: num(p.x) - offsetX * (scaleRatio - 1), y: num(p.y) - offsetY * (scaleRatio - 1) }));
-      const next = { ...s, scale: nextScale };
-      scheduleBgSnapshot(next);
-      return next;
-    });
-  };
+  const applyZoomAt = (screenX, screenY, factor) => { const f = num(factor, 1); setBgSize((s) => { const nextScale = Math.min(5, Math.max(0.2, num(s.scale, 1) * f)); const dispW = num(s.baseW) * num(s.scale, 1), dispH = num(s.baseH) * num(s.scale, 1); const { left, top, width: cw, height: ch } = getCanvasRect(canvasRef.current); const beforeDx = Math.floor((cw - dispW) / 2) + Math.round(num(bgPan.x)); const beforeDy = Math.floor((ch - dispH) / 2) + Math.round(num(bgPan.y)); const offsetX = screenX - (left + beforeDx), offsetY = screenY - (top + beforeDy); const scaleRatio = nextScale / num(s.scale, 1); setBgPan((p) => ({ x: num(p.x) - offsetX * (scaleRatio - 1), y: num(p.y) - offsetY * (scaleRatio - 1) })); const next = { ...s, scale: nextScale }; scheduleBgSnapshot(next); return next; }); };
   const onCanvasWheel = (e) => { if (!bgUrl || !(e.shiftKey || e.ctrlKey)) return; e.preventDefault(); const { left, top } = getCanvasRect(canvasRef.current); const step = e.shiftKey && e.ctrlKey ? 0.15 : 0.1; const factor = 1 + (e.deltaY < 0 ? 1 : -1) * step; applyZoomAt(e.clientX - left, e.clientY - top, factor); };
   const nudgeZoom = (m) => { if (!bgUrl) return; const { left, top, width, height } = getCanvasRect(canvasRef.current); applyZoomAt(left + width / 2, top + height / 2, m); };
 
@@ -489,15 +313,13 @@ export default function ImageCanvasApp() {
       canvas.width = outW * dpr; canvas.height = outH * dpr; canvas.style.width = `${outW}px`; canvas.style.height = `${outH}px`;
       const ctx = canvas.getContext("2d"); if (!ctx) return; ctx.scale(dpr, dpr);
       if (!exportOnlyBgArea) { ctx.fillStyle = "#faf9f5"; ctx.fillRect(0, 0, outW, outH); }
-      if (bgUrl && dispW > 0 && dispH > 0) {
-        await new Promise((resolve) => { const img = new Image(); img.onload = () => { const x = exportOnlyBgArea ? 0 : Math.round(num(bgDx)); const y = exportOnlyBgArea ? 0 : Math.round(num(bgDy)); ctx.drawImage(img, x, y, round(dispW, 1), round(dispH, 1)); resolve(); }; img.onerror = resolve; img.src = bgUrl; });
-      }
+      if (bgUrl && dispW > 0 && dispH > 0) { await new Promise((resolve) => { const img = new Image(); img.onload = () => { const x = exportOnlyBgArea ? 0 : Math.round(num(bgDx)); const y = exportOnlyBgArea ? 0 : Math.round(num(bgDy)); ctx.drawImage(img, x, y, round(dispW, 1), round(dispH, 1)); resolve(); }; img.onerror = resolve; img.src = bgUrl; }); }
       const { refW, refH } = getRefFrame();
       const drawRects = (list, color) => { ctx.save(); ctx.globalAlpha = 0.35; ctx.fillStyle = color; ctx.strokeStyle = color; for (const r of list) { const leftPx = round(num(r.fx) * refW), topPx = round(num(r.fy) * refH); const wPx = round(num(r.fw) * refW), hPx = round(num(r.fh) * refH); const drawX = exportOnlyBgArea ? leftPx - round(num(bgDx)) : leftPx; const drawY = exportOnlyBgArea ? topPx - round(num(bgDy)) : topPx; ctx.fillRect(drawX, drawY, wPx, hPx); ctx.strokeRect(drawX, drawY, wPx, hPx); } ctx.restore(); };
       drawRects(floors, '#0a28a0'); drawRects(walls, '#ff4da6'); drawRects(windows, '#00a050');
-      for (const it of items) { const node = document.getElementById(it.id); if (!node) continue; const svg = node.querySelector("svg"); if (!svg) continue; const left0 = round(num(it.fx) * refW), top0 = round(num(it.fy) * refH); const left = exportOnlyBgArea ? left0 - round(num(bgDx)) : left0; const top = exportOnlyBgArea ? top0 - round(num(bgDy)) : top0; const cloneSvg = svg.cloneNode(true); const svgStr = new XMLSerializer().serializeToString(cloneSvg); const blob = new Blob([svgStr], { type: "image/svg+xml;charset=utf-8" }); const url = URL.createObjectURL(blob); const sizePx = Math.max(16, Math.min(256, num(it.size || 48))); await new Promise((resolve) => { const img = new Image(); img.onload = () => { ctx.drawImage(img, left, top, sizePx, sizePx); URL.revokeObjectURL(url); resolve(); }; img.onerror = () => { URL.revokeObjectURL(url); resolve(); }; img.src = url; }); }
-      const a = document.createElement("a"); a.href = canvas.toDataURL("image/png"); a.download = exportOnlyBgArea ? "composition-transparent.png" : "composition.png"; document.body.appendChild(a); a.click(); a.remove();
-    } catch (err) { console.error("saveCompositionImage failed", err); alert("Could not save the composition image."); }
+      for (const it of items) { const node = document.getElementById(it.id); if (!node) continue; const svg = node.querySelector("svg"); if (!svg) continue; const left0 = round(num(it.fx) * refW), top0 = round(num(it.fy) * refH); const left = exportOnlyBgArea ? left0 - round(num(bgDx)) : left0; const top = exportOnlyBgArea ? top0 - round(num(bgDy)) : top0; const cloneSvg = svg.cloneNode(true); const svgStr = new XMLSerializer().serializeToString(cloneSvg); const blob = new Blob([svgStr], { type: 'image/svg+xml;charset=utf-8' }); const url = URL.createObjectURL(blob); const sizePx = Math.max(16, Math.min(256, num(it.size || 48))); await new Promise((resolve) => { const img = new Image(); img.onload = () => { ctx.drawImage(img, left, top, sizePx, sizePx); URL.revokeObjectURL(url); resolve(); }; img.onerror = () => { URL.revokeObjectURL(url); resolve(); }; img.src = url; }); }
+      const a = document.createElement('a'); a.href = canvas.toDataURL('image/png'); a.download = exportOnlyBgArea ? 'composition-transparent.png' : 'composition.png'; document.body.appendChild(a); a.click(); a.remove();
+    } catch (err) { console.error('saveCompositionImage failed', err); alert('Could not save the composition image.'); }
   }
 
   // undo/redo
@@ -510,35 +332,26 @@ export default function ImageCanvasApp() {
   useEffect(() => { const onKeyDown = (e) => { const mod = e.ctrlKey || e.metaKey; if (!mod) return; const k = e.key.toLowerCase(); if (k === 'z' && !e.shiftKey) { e.preventDefault(); undoRef.current(); } else if (k === 'z' && e.shiftKey) { e.preventDefault(); redoRef.current(); } else if (k === 'y') { e.preventDefault(); redoRef.current(); } }; window.addEventListener('keydown', onKeyDown); return () => window.removeEventListener('keydown', onKeyDown); }, []);
   useEffect(() => { const onResize = () => forceResizeTick((t) => t + 1); window.addEventListener('resize', onResize); return () => window.removeEventListener('resize', onResize); }, []);
 
-  // micro runtime tests (added guards for NaN/invalid sizes and clone undefined)
-  useEffect(() => {
-    try {
-      const T = [];
-      const push = (name, cond) => { if (!cond) console.warn('Runtime test failed:', name); T.push({ name, pass: !!cond }); };
-      // Existing sanity
-      push('fitWithin square', JSON.stringify(fitWithin(1000, 1000, 500, 1000)) === JSON.stringify({ w: 500, h: 500 }));
-      push('clamp01 edges', clamp01(-0.5) === 0 && clamp01(1.5) === 1);
-      const r = normRect(0.8, 0.2, 0.1, 0.9);
-      push('normRect order', r.fx === 0.1 && r.fy === 0.2 && Math.abs(r.fw - 0.7) < 1e-9 && Math.abs(r.fh - 0.7) < 1e-9);
-      // New edge cases
-      push('fitWithin NaN', JSON.stringify(fitWithin(NaN, 100, 500, 1000)) === JSON.stringify({ w: 0, h: 0 }));
-      push('fitWithin negative', JSON.stringify(fitWithin(-50, 100, 500, 1000)) === JSON.stringify({ w: 0, h: 0 }));
-      push('isSquareish NaN', isSquareish(NaN, 100) === false);
-      push('isSquareish zero', isSquareish(0, 100) === false);
-      // clone safety
-      let threw = false; try { clone(undefined); } catch { threw = true; } push('clone undefined safe', threw === false);
-      threw = false; try { clone([{ a: 1, f: () => {} }]); } catch { threw = true; } push('clone function safe', threw === false);
-      // style width/height must be finite
-      const dims = (() => { const baseW = NaN, baseH = 200, scale = 1.5; return { dispW: Math.max(0, round(num(baseW) * num(scale, 1))), dispH: Math.max(0, round(num(baseH) * num(scale, 1))) }; })();
-      push('display dims finite', Number.isFinite(dims.dispW) && Number.isFinite(dims.dispH));
-    } catch {}
-  }, []);
+  // micro runtime tests
+  useEffect(() => { try { const T = []; const push = (n, c) => { if (!c) console.warn('Runtime test failed:', n); T.push({ n, pass: !!c }); };
+    push('fitWithin square', JSON.stringify(fitWithin(1000,1000,500,1000))===JSON.stringify({w:500,h:500}));
+    push('clamp01 edges', clamp01(-0.5)===0 && clamp01(1.5)===1);
+    const r = normRect(0.8,0.2,0.1,0.9); push('normRect', r.fx===0.1 && r.fy===0.2 && Math.abs(r.fw-0.7)<1e-9 && Math.abs(r.fh-0.7)<1e-9);
+    push('fitWithin NaN', JSON.stringify(fitWithin(NaN,100,500,1000))===JSON.stringify({w:0,h:0}));
+    push('isSquareish zero', isSquareish(0,100)===false);
+    let threw=false; try{ clone(undefined);}catch{threw=true;} push('clone undefined', threw===false);
+    // extra tests
+    push('fitWithin Infinity', JSON.stringify(fitWithin(Infinity,100,500,1000))===JSON.stringify({w:0,h:0}));
+    const r2 = normRect(-0.5, 2, 0.2, -1); push('normRect clamps', r2.fx===0 && r2.fy===0 && r2.fw<=1 && r2.fh<=1);
+    // new: merge safe behavior
+    const m = merge({a:1}, undefined); push('merge undefined patch', m.a===1 && Object.keys(m).length===1);
+  } catch {} }, []);
 
-  const defocusActive = () => { const ae = document.activeElement; if (ae && typeof ae.blur === 'function' && ae !== document.body) ae.blur(); };
+  const defocusActive = () => { const ae = document.activeElement; if (ae && typeof ae.blur==='function' && ae !== document.body) ae.blur(); };
 
   const { refW, refH } = getRefFrame();
 
-  // ---------- small comps (closure uses refW/refH) ----------
+  // ---------- components ----------
   const Handles = ({ kind, r }) => {
     if (!selecting) return null;
     const leftPx = Math.round(num(r.fx) * refW), topPx = Math.round(num(r.fy) * refH);
@@ -563,7 +376,7 @@ export default function ImageCanvasApp() {
 
   const RectLayer = ({ kind }) => {
     const list = getLayer(kind); const { fill, stroke } = COLORS[kind];
-    const draftFill = fill.includes('0.35') ? fill.replace('0.35', '0.2') : fill;
+    const draftFill = fill.includes('0.35') ? fill.replace('0.35','0.2') : fill;
     return (
       <>
         {list.map((r) => {
@@ -588,10 +401,10 @@ export default function ImageCanvasApp() {
         const sizePx = Math.max(16, Math.min(256, num(it.size || 48))); const scale = sizePx / 48;
         return (
           <React.Fragment key={it.id}>
-            <div id={it.id} style={{ ...styles.placed, left, top, transform: `scale(${scale})`, transformOrigin: "top left" }} onPointerDown={(e) => { e.stopPropagation(); onItemPointerDown(e, it.id); }} onClickCapture={(e) => e.stopPropagation()} onDragStart={(e) => e.preventDefault()} onDoubleClick={() => removeItem(it.id)} title={`${it.type}`} role="img" aria-label={it.type} tabIndex={-1}>
+            <div id={it.id} style={{ ...styles.placed, left, top, transform: `scale(${scale})`, transformOrigin: 'top left' }} onPointerDown={(e) => { e.stopPropagation(); onItemPointerDown(e, it.id); }} onClickCapture={(e) => e.stopPropagation()} onDragStart={(e) => e.preventDefault()} onDoubleClick={() => removeItem(it.id)} title={`${it.type}`} role="img" aria-label={it.type} tabIndex={-1}>
               {Icon[it.type]?.(48)}
             </div>
-            <div role="button" aria-label="Resize" style={{ position: "absolute", left: left + sizePx - 6, top: top + sizePx - 6, zIndex: 11, width: 16, height: 16, borderRadius: 8, background: "#fff", border: "1px solid rgba(0,0,0,0.3)", boxShadow: "0 1px 2px rgba(0,0,0,0.2)", display: "grid", placeItems: "center", cursor: "nwse-resize", touchAction: "none" }} onPointerDown={(e) => { e.stopPropagation(); onItemResizePointerDown(e, it.id); }} onClickCapture={(e) => e.stopPropagation()}>
+            <div role="button" aria-label="Resize" style={{ position: 'absolute', left: left + sizePx - 6, top: top + sizePx - 6, zIndex: 11, width: 16, height: 16, borderRadius: 8, background: '#fff', border: '1px solid rgba(0,0,0,0.3)', boxShadow: '0 1px 2px rgba(0,0,0,0.2)', display: 'grid', placeItems: 'center', cursor: 'nwse-resize', touchAction: 'none' }} onPointerDown={(e) => { e.stopPropagation(); onItemResizePointerDown(e, it.id); }} onClickCapture={(e) => e.stopPropagation()}>
               <span style={{ fontSize: 10, lineHeight: 1, userSelect: 'none', pointerEvents: 'none' }}>↘︎</span>
             </div>
           </React.Fragment>
@@ -602,28 +415,14 @@ export default function ImageCanvasApp() {
 
   const ActiveLabel = activeTool ? (activeTool === 'wall' ? 'Walls' : activeTool === 'window' ? 'Windows' : 'Floor') : 'None';
 
-  const ImgWithSafeDims = () => {
-    const { dispW, dispH } = getDisplayDims();
-    const w = Math.max(1, dispW), h = Math.max(1, dispH);
-    return (
-      <img
-        src={bgUrl}
-        alt="Background"
-        draggable={false}
-        onDragOver={onCanvasDragOver}
-        onDragEnter={onCanvasDragOver}
-        onDrop={onCanvasDrop}
-        style={{ width: w, height: h, objectFit: 'contain', background: '#fff', borderRadius: 12 }}
-      />
-    );
-  };
+  const ImgWithSafeDims = () => { const { dispW, dispH } = getDisplayDims(); const w = Math.max(1, dispW), h = Math.max(1, dispH); return (<img src={bgUrl} alt="Background" draggable={false} onDragOver={onCanvasDragOver} onDragEnter={onCanvasDragOver} onDrop={onCanvasDrop} style={{ width: w, height: h, objectFit: 'contain', background: '#fff', borderRadius: 12 }} />); };
 
   return (
-    <div style={styles.app} tabIndex={-1} onMouseDown={() => { const ae = document.activeElement; if (ae && typeof ae.blur === 'function' && ae !== document.body) ae.blur(); }}>
+    <div style={styles.app} tabIndex={-1} onMouseDown={defocusActive}>
       {/* toolbar */}
       <div style={styles.floaterBar}>
         <button aria-label="Save as image" style={styles.floaterBtn} title="Save as image" onClick={saveCompositionImage}>⬇️</button>
-        <button aria-label="Zoom out" style={styles.floaterBtn} title="Zoom out" onClick={() => nudgeZoom(1 / 1.1)}>−</button>
+        <button aria-label="Zoom out" style={styles.floaterBtn} title="Zoom out" onClick={() => nudgeZoom(1/1.1)}>−</button>
         <button aria-label="Zoom in" style={styles.floaterBtn} title="Zoom in" onClick={() => nudgeZoom(1.1)}>＋</button>
         <button aria-label="Clear items/walls" style={styles.floaterBtn} title="Clear items & walls" onClick={clearAll}>🧹</button>
         <button aria-label="Remove background" style={styles.floaterBtn} title="Remove background" onClick={clearBackground}>🗑️</button>
@@ -654,16 +453,16 @@ export default function ImageCanvasApp() {
       <aside style={styles.sidebar(sidebarOpen)} aria-hidden={!sidebarOpen}>
         {PALETTE.map((p) => (
           <div key={p.type} draggable onDragStart={(e) => onPaletteDragStart(e, p.type)} style={styles.paletteCard} title={`Drag ${p.label}`}>
-            {Icon[p.type](48)}
+            {Icon[p.type]?.(48)}
             <div style={{ fontSize: 14 }}>{p.label}</div>
           </div>
         ))}
       </aside>
 
-      {/* Canvas */}
+      {/* canvas */}
       <div
         ref={canvasRef}
-        style={{ position: "relative", width: "100%", height: "100%", display: "grid", placeItems: "center" }}
+        style={{ position: 'relative', width: '100%', height: '100%', display: 'grid', placeItems: 'center' }}
         onDragEnter={onCanvasDragOver}
         onDragOver={onCanvasDragOver}
         onDrop={onCanvasDrop}
@@ -675,38 +474,42 @@ export default function ImageCanvasApp() {
         onWheel={onCanvasWheel}
       >
         {bgUrl ? (
-          <img src={bgUrl} alt="Background" draggable={false} onDragOver={onCanvasDragOver} onDragEnter={onCanvasDragOver} onDrop={onCanvasDrop} style={{ width: Math.max(0, Math.round(bgSize.baseW * bgSize.scale)), height: Math.max(0, Math.round(bgSize.baseH * bgSize.scale)), objectFit: "contain", background: "#fff", borderRadius: 12 }} />
+          <ImgWithSafeDims />
         ) : (
-          <div style={{ textAlign: "center", color: "#666" }}>
+          <div style={{ textAlign: 'center', color: '#666' }}>
             <div style={{ fontSize: 18, marginBottom: 6 }}>Drop an image anywhere</div>
             <div style={{ fontSize: 13, marginBottom: 12, opacity: .8 }}>or</div>
             <button onClick={() => fileInputRef.current?.click()} style={styles.topChooseBtn}>Choose a file</button>
           </div>
         )}
 
-        {/* Floors at the very bottom, then walls, then windows, then items */}
+        {/* layers order: floor → wall → window → items */}
         <RectLayer kind="floor" />
         <RectLayer kind="wall" />
         <RectLayer kind="window" />
-
         <Items />
       </div>
 
-      {/* Undo / Redo */}
+      {/* window bottom note */}
+      {windowNote && <div style={styles.note}>{windowNote}</div>}
+
+      {/* undo/redo */}
       <div style={styles.undoRedoBar}>
         <button aria-label="Undo" style={styles.undoRedoBtn(canUndo)} onClick={undo} disabled={!canUndo} title="Undo (Ctrl/⌘+Z)">↩︎ Undo</button>
         <button aria-label="Redo" style={styles.undoRedoBtn(canRedo)} onClick={redo} disabled={!canRedo} title="Redo (Ctrl/⌘+Y or Shift+Ctrl/⌘+Z)">Redo ↪︎</button>
       </div>
 
-      {/* Info */}
+      {/* info */}
       <button type="button" aria-label="Show tips" style={styles.infoBtn} onClick={() => setShowInfo((v) => !v)}>ℹ️</button>
       {showInfo && (
         <div style={styles.infoBox}>
           <div style={{ fontWeight: 600, marginBottom: 6 }}>Tips</div>
           <div>
-            On desktop, hold <kbd>Shift</kbd> or <kbd>Ctrl/Cmd</kbd> and scroll to zoom the background. On touch devices, use the ＋/− buttons.
-            Double‑click an item to delete it. Hold <kbd>Space</kbd> and drag to pan.
-            <br />Draw rectangles: click <strong>Select</strong> on the right, choose <em>Walls</em> (pink), <em>Windows</em> (green), or <em>Floor</em> (dark blue). Click to start and click again to finish. Drag handles to resize.
+            <div>Hold <kbd>Shift</kbd> or <kbd>Ctrl/Cmd</kbd> and scroll to zoom.</div>
+            <div>Hold <kbd>Space</kbd> and drag to pan.</div>
+            <div>Double-click an item to delete it.</div>
+            <div>Use <strong>Select</strong> to draw <em>Walls</em>, <em>Windows</em>, or <em>Floor</em>. Click to start, click to finish.</div>
+            <div>Handles show only in Select mode; click <em>Stop selecting</em> to hide them.</div>
           </div>
         </div>
       )}
