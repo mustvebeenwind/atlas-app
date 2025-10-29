@@ -91,6 +91,7 @@ const merge = (o, p) => ({
   ...(isPlainObject(p) ? p : {}),
 });
 const clamp01 = (n) => Math.max(0, Math.min(1, Number.isFinite(n) ? n : 0));
+// Deep clone that never throws: handles undefined/functions/non-serializable.
 const clone = (v) => {
   if (v === undefined) return [];
   try {
@@ -405,10 +406,11 @@ const styles = {
     borderRadius: 4,
     pointerEvents: "none",
   }),
+  // smaller 8×8 handles
   resizeHandle: (color) => ({
     position: "absolute",
-    width: 12,
-    height: 12,
+    width: 8,
+    height: 8,
     background: "#fff",
     border: `2px solid ${color}`,
     borderRadius: 3,
@@ -868,6 +870,7 @@ export default function ImageCanvasApp() {
   // pointer move / pan / pinch
   const MIN_SIDE = 0.005;
   const onCanvasPointerMove = (e) => {
+    // shape resize
     const rs = shapeResizingRef.current;
     if (rs.id) {
       const { fx, fy } = getRel(e.clientX, e.clientY);
@@ -930,6 +933,7 @@ export default function ImageCanvasApp() {
       setLayer(rs.kind, (prev) => prev.map((r) => (r.id === rs.id ? merge(r, nxt) : r)));
       return;
     }
+    // item resize
     const rsz = resizingRef.current;
     if (rsz.id) {
       const it = items.find((i) => i.id === rsz.id);
@@ -939,6 +943,7 @@ export default function ImageCanvasApp() {
       setItems((p) => p.map((x) => (x.id === rsz.id ? merge(x, { size }) : x)));
       return;
     }
+    // shape drag
     const sd = shapeDraggingRef.current;
     if (sd.id) {
       const { fx, fy } = getRel(e.clientX, e.clientY);
@@ -949,10 +954,28 @@ export default function ImageCanvasApp() {
       setLayer(sd.kind, (p) => p.map((r) => (r.id === sd.id ? merge(r, { fx: nx, fy: ny }) : r)));
       return;
     }
+    // item drag
+    const drag = draggingRef.current;
+    if (drag.id) {
+      const { fx, fy } = getRel(e.clientX, e.clientY);
+      setItems((p) =>
+        p.map((it) =>
+          it.id === drag.id
+            ? merge(it, {
+                fx: clamp01(num(fx) - num(drag.offsetFx)),
+                fy: clamp01(num(fy) - num(drag.offsetFy)),
+              })
+            : it
+        )
+      );
+      return;
+    }
+    // draft preview
     if (activeTool && selecting && draft) {
       const { fx, fy } = getRel(e.clientX, e.clientY);
       setDraft((d) => merge(d, { end: { fx, fy } }));
     }
+    // pan
     if (panDragRef.current.active) {
       setBgPan({
         x: num(panDragRef.current.origX) + (e.clientX - panDragRef.current.startX),
@@ -960,6 +983,7 @@ export default function ImageCanvasApp() {
       });
       return;
     }
+    // pinch
     if (e.pointerType === "touch" && pointersRef.current.has(e.pointerId)) {
       pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (pointersRef.current.size === 2) {
@@ -1037,8 +1061,8 @@ export default function ImageCanvasApp() {
     onCanvasPointerMove._lastMid = null;
   };
 
-  const onCanvasPointerCancel = () => {
-    pointersRef.current.delete?.();
+  const onCanvasPointerCancel = (e) => {
+    pointersRef.current.delete(e.pointerId);
     panDragRef.current.active = false;
     onCanvasPointerMove._lastDist = null;
     onCanvasPointerMove._lastMid = null;
@@ -1310,14 +1334,14 @@ export default function ImageCanvasApp() {
     );
     return (
       <>
-        {mk("nw", { left: leftPx - 6, top: topPx - 6 }, "nwse-resize")}
-        {mk("ne", { left: leftPx + wPx - 6, top: topPx - 6 }, "nesw-resize")}
-        {mk("sw", { left: leftPx - 6, top: topPx + hPx - 6 }, "nesw-resize")}
-        {mk("se", { left: leftPx + wPx - 6, top: topPx + hPx - 6 }, "nwse-resize")}
-        {mk("n", { left: cx - 6, top: topPx - 6 }, "ns-resize")}
-        {mk("s", { left: cx - 6, top: topPx + hPx - 6 }, "ns-resize")}
-        {mk("w", { left: leftPx - 6, top: cy - 6 }, "ew-resize")}
-        {mk("e", { left: leftPx + wPx - 6, top: cy - 6 }, "ew-resize")}
+        {mk("nw", { left: leftPx - 4, top: topPx - 4 }, "nwse-resize")}
+        {mk("ne", { left: leftPx + wPx - 4, top: topPx - 4 }, "nesw-resize")}
+        {mk("sw", { left: leftPx - 4, top: topPx + hPx - 4 }, "nesw-resize")}
+        {mk("se", { left: leftPx + wPx - 4, top: topPx + hPx - 4 }, "nwse-resize")}
+        {mk("n", { left: cx - 4, top: topPx - 4 }, "ns-resize")}
+        {mk("s", { left: cx - 4, top: topPx + hPx - 4 }, "ns-resize")}
+        {mk("w", { left: leftPx - 4, top: cy - 4 }, "ew-resize")}
+        {mk("e", { left: leftPx + wPx - 4, top: cy - 4 }, "ew-resize")}
       </>
     );
   };
