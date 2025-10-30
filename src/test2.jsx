@@ -13,71 +13,81 @@ import React, { useRef, useState, useEffect } from "react";
  *  - Numeric guards so styles never receive NaN/Infinity
  */
 
-/* ======================= Yeat-ish bell synth ======================= */
+/* ======================= Yeat-ish bell synth (gesture-gated) ======================= */
+async function ensureAudioContextAsync(ref) {
+  if (!ref.current) {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    ref.current = new AC({ latencyHint: "interactive" });
+  }
+  if (ref.current.state === "suspended") {
+    try {
+      await ref.current.resume();
+    } catch {
+      /* ignore */
+    }
+  }
+  return ref.current;
+}
+
 function playYeatBell(ctx, { gain = 0.9, pitch = 880 } = {}) {
   const t = ctx.currentTime;
 
+  // Master
   const master = ctx.createGain();
-  master.gain.value = gain;
+  master.gain.setValueAtTime(gain, t);
   master.connect(ctx.destination);
 
+  // FM-ish bell: sine carrier + slow sine mod + partial
   const carrier = ctx.createOscillator();
   carrier.type = "sine";
   carrier.frequency.setValueAtTime(pitch, t);
 
   const mod = ctx.createOscillator();
   mod.type = "sine";
-  mod.frequency.setValueAtTime(pitch / 4, t);
+  mod.frequency.setValueAtTime(pitch / 4, t); // slow wobble
 
   const modDepth = ctx.createGain();
-  modDepth.gain.setValueAtTime(520, t);
+  modDepth.gain.setValueAtTime(520, t); // depth of freq modulation
   mod.connect(modDepth).connect(carrier.frequency);
 
   const partial = ctx.createOscillator();
   partial.type = "triangle";
   partial.frequency.setValueAtTime(pitch * 1.5, t);
 
+  // Envelope
   const env = ctx.createGain();
   env.gain.setValueAtTime(0.0001, t);
-  env.gain.linearRampToValueAtTime(1.0, t + 0.007);
+  env.gain.linearRampToValueAtTime(1.0, t + 0.006);
   env.gain.exponentialRampToValueAtTime(0.0001, t + 0.85);
 
+  // Simple stereo spread that works across browsers
   const delayL = ctx.createDelay();
   const delayR = ctx.createDelay();
-  delayL.delayTime.value = 0.008;
-  delayR.delayTime.value = 0.011;
+  delayL.delayTime.setValueAtTime(0.008, t);
+  delayR.delayTime.setValueAtTime(0.011, t);
 
-  const splitter = ctx.createChannelSplitter(2);
-  const merger = ctx.createChannelMerger(2);
+  const leftBus = ctx.createGain();
+  const rightBus = ctx.createGain();
+  leftBus.gain.setValueAtTime(0.5, t);
+  rightBus.gain.setValueAtTime(0.5, t);
 
-  env.connect(splitter);
-  splitter.connect(delayL, 0);
-  splitter.connect(delayR, 1);
-  delayL.connect(merger, 0, 0);
-  delayR.connect(merger, 0, 1);
-  merger.connect(master);
-
+  // Wire
   carrier.connect(env);
   partial.connect(env);
 
+  // Split env to L/R with slight delays for width
+  env.connect(delayL).connect(leftBus);
+  env.connect(delayR).connect(rightBus);
+  leftBus.connect(master);
+  rightBus.connect(master);
+
+  // Start/stop
   carrier.start(t);
   mod.start(t);
   partial.start(t);
-
   carrier.stop(t + 1.0);
   mod.stop(t + 1.0);
   partial.stop(t + 1.0);
-}
-
-function ensureAudioContext(ref) {
-  if (!ref.current) {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    ref.current = new AC();
-  }
-  if (ref.current.state === "suspended") {
-    ref.current.resume().catch(() => {});
-  }
-  return ref.current;
 }
 
 /* ======================= tiny utils ======================= */
@@ -395,7 +405,7 @@ const styles = {
     position: "absolute",
     background: b,
     border: `2px solid ${s}`,
-    borderRadius: 0,
+    borderRadius: 4,
     pointerEvents: "auto",
     cursor: "move",
   }),
@@ -545,26 +555,40 @@ export default function ImageCanvasApp() {
     startLayer: null,
   });
 
-  // audio
+  // audio (play once on first user gesture)
   const audioCtxRef = useRef(null);
   const bellPlayedRef = useRef(false);
   useEffect(() => {
-    try {
-      const ctx = ensureAudioContext(audioCtxRef);
-      playYeatBell(ctx);
-      bellPlayedRef.current = true;
-    } catch {}
-    const unlock = () => {
-      if (bellPlayedRef.current) return;
-      const ctx = ensureAudioContext(audioCtxRef);
-      playYeatBell(ctx);
-      bellPlayedRef.current = true;
+    let done = false;
+
+    const fire = async () => {
+      if (done || bellPlayedRef.current) return;
+      try {
+        const ctx = await ensureAudioContextAsync(audioCtxRef);
+        setTimeout(() => {
+          try {
+            playYeatBell(ctx);
+            bellPlayedRef.current = true;
+          } catch {
+            /* ignore */
+          }
+        }, 0);
+      } finally {
+        done = true;
+        window.removeEventListener("pointerdown", fire, { capture: true });
+        window.removeEventListener("keydown", fire, { capture: true });
+        window.removeEventListener("touchstart", fire, { capture: true });
+      }
     };
-    window.addEventListener("pointerdown", unlock, { passive: true });
-    window.addEventListener("keydown", unlock, { passive: true });
+
+    window.addEventListener("pointerdown", fire, { passive: true, capture: true });
+    window.addEventListener("keydown", fire, { passive: true, capture: true });
+    window.addEventListener("touchstart", fire, { passive: true, capture: true });
+
     return () => {
-      window.removeEventListener("pointerdown", unlock);
-      window.removeEventListener("keydown", unlock);
+      window.removeEventListener("pointerdown", fire, { capture: true });
+      window.removeEventListener("keydown", fire, { capture: true });
+      window.removeEventListener("touchstart", fire, { capture: true });
     };
   }, []);
 
@@ -1531,7 +1555,7 @@ export default function ImageCanvasApp() {
           height: h,
           objectFit: "contain",
           background: "#fff",
-          borderRadius: 0,
+          borderRadius: 12,
         }}
       />
     );
@@ -1588,6 +1612,30 @@ export default function ImageCanvasApp() {
           onChange={onInputChange}
           hidden
         />
+      </div>
+
+      {/* undo / redo */}
+      <div style={styles.undoRedoBar}>
+        <button
+          type="button"
+          style={styles.undoRedoBtn(canUndo)}
+          onClick={undo}
+          disabled={!canUndo}
+          aria-label="Undo (Ctrl/Cmd+Z)"
+          title="Undo (Ctrl/Cmd+Z)"
+        >
+          ⟲ Undo
+        </button>
+        <button
+          type="button"
+          style={styles.undoRedoBtn(canRedo)}
+          onClick={redo}
+          disabled={!canRedo}
+          aria-label="Redo (Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y)"
+          title="Redo (Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y)"
+        >
+          ⟳ Redo
+        </button>
       </div>
 
       {/* right-center controls */}
@@ -1754,27 +1802,6 @@ export default function ImageCanvasApp() {
             Tip: you can enter decimals (e.g., 37.5)
           </div>
         </form>
-        {/* undo / redo buttons */}
-        <div style={styles.undoRedoBar}>
-            <button
-              style={styles.undoRedoBtn(canUndo)}
-              disabled={!canUndo}
-              onClick={undo}
-              aria-label="Undo"
-              title="Undo (Ctrl/Cmd+Z)"
-            >
-              ↶ Undo
-            </button>
-            <button
-              style={styles.undoRedoBtn(canRedo)}
-              disabled={!canRedo}
-              onClick={redo}
-              aria-label="Redo"
-              title="Redo (Ctrl+Shift+Z / Ctrl+Y)"
-            >
-              ↷ Redo
-            </button>
-          </div>
       )}
     </div>
   );
