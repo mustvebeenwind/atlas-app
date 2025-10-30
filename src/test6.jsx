@@ -143,6 +143,15 @@ const normRect = (fx0, fy0, fx1, fy1) => {
   return { fx: x0, fy: y0, fw: clamp01(x1 - x0), fh: clamp01(y1 - y0) };
 };
 
+// Like normRect but WITHOUT clamping — lets shapes exist outside [0,1]
+const normRectLoose = (fx0, fy0, fx1, fy1) => {
+  const L = Math.min(num(fx0), num(fx1));
+  const T = Math.min(num(fy0), num(fy1));
+  const R = Math.max(num(fx0), num(fx1));
+  const B = Math.max(num(fy0), num(fy1));
+  return { fx: L, fy: T, fw: R - L, fh: B - T };
+};
+
 /* ======================= icons & data ======================= */
 const stroke = "#333";
 const S = {
@@ -406,7 +415,7 @@ const styles = {
     borderRadius: 4,
     pointerEvents: "none",
   }),
-  // keep handle style (not rendered)
+  // smaller 8×8 handles
   resizeHandle: (color) => ({
     position: "absolute",
     width: 8,
@@ -527,7 +536,7 @@ export default function ImageCanvasApp() {
   });
   const pointersRef = useRef(new Map());
 
-  // shape move/resize refs (kept; handles not rendered)
+  // shape move/resize refs
   const shapeDraggingRef = useRef({
     kind: null,
     id: null,
@@ -637,15 +646,13 @@ export default function ImageCanvasApp() {
       dispH: f.dispH,
     };
   };
-
-  // UPDATED: getRel uses the displayed background rect, and ALLOWS outside coords
   const getRel = (x, y) => {
-    const { dx, dy, left, top, dispW, dispH } = getBgFrame();
+    const { dx, dy, left, top, refW, refH } = getRefFrame();
     return {
-      fx: (x - (left + dx)) / Math.max(1, dispW), // no clamp
-      fy: (y - (top + dy)) / Math.max(1, dispH),  // no clamp
-      dispW,
-      dispH,
+      fx: (x - (left + dx)) / (refW || 1), // NOTE: no clamp to allow outside
+      fy: (y - (top + dy)) / (refH || 1),
+      refW,
+      refH,
     };
   };
 
@@ -791,10 +798,9 @@ export default function ImageCanvasApp() {
       setDraft({ start: { fx, fy }, end: { fx, fy } });
       return;
     }
-    const r = normRect(draft.start.fx, draft.start.fy, fx, fy);
-    const id = `${activeTool}_${Date.now()}_${Math.random()
-      .toString(36)
-      .slice(2)}`;
+    // Use UNCLAMPED rect so you can draw outside the image
+    const r = normRectLoose(draft.start.fx, draft.start.fy, fx, fy);
+    const id = `${activeTool}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     const next = [...getLayer(activeTool), { id, ...r }];
     snapshotLayer(activeTool, next);
     setDraft(null);
@@ -855,7 +861,6 @@ export default function ImageCanvasApp() {
     e.currentTarget?.setPointerCapture?.(e.pointerId);
   };
   const onShapeHandlePointerDown = (e, k, id, handle) => {
-    // Handles not rendered; keep for future use
     if (!selecting) return;
     e.stopPropagation();
     const r = getLayer(k).find((x) => x.id === id);
@@ -873,7 +878,7 @@ export default function ImageCanvasApp() {
   // pointer move / pan / pinch
   const MIN_SIDE = 0.005;
   const onCanvasPointerMove = (e) => {
-    // shape resize (won't trigger since handles hidden)
+    // shape resize
     const rs = shapeResizingRef.current;
     if (rs.id) {
       const { fx, fy } = getRel(e.clientX, e.clientY);
@@ -946,16 +951,16 @@ export default function ImageCanvasApp() {
       setItems((p) => p.map((x) => (x.id === rsz.id ? merge(x, { size }) : x)));
       return;
     }
-    // UPDATED: shape drag (no clamping → can move outside background)
+    // shape drag
     const sd = shapeDraggingRef.current;
     if (sd.id) {
       const { fx, fy } = getRel(e.clientX, e.clientY);
-      const nx = num(fx) - num(sd.offsetFx);
-      const ny = num(fy) - num(sd.offsetFy);
+      let nx = (num(fx) - num(sd.offsetFx));
+      let ny = (num(fy) - num(sd.offsetFy));
       setLayer(sd.kind, (p) => p.map((r) => (r.id === sd.id ? merge(r, { fx: nx, fy: ny }) : r)));
       return;
     }
-    // UPDATED: item drag (no clamping)
+    // item drag
     const drag = draggingRef.current;
     if (drag.id) {
       const { fx, fy } = getRel(e.clientX, e.clientY);
@@ -963,8 +968,8 @@ export default function ImageCanvasApp() {
         p.map((it) =>
           it.id === drag.id
             ? merge(it, {
-                fx: num(fx) - num(drag.offsetFx),
-                fy: num(fy) - num(drag.offsetFy),
+                fx: (num(fx) - num(drag.offsetFx)),
+                fy: (num(fy) - num(drag.offsetFy)),
               })
             : it
         )
@@ -1122,10 +1127,10 @@ export default function ImageCanvasApp() {
   const onCanvasWheel = (e) => {
     if (!bgUrl || !(e.shiftKey || e.ctrlKey)) return;
     e.preventDefault();
-    const { left, top } = getCanvasRect(canvasRef.current);
     const step = e.shiftKey && e.ctrlKey ? 0.15 : 0.1;
     const factor = 1 + (e.deltaY < 0 ? 1 : -1) * step;
-    applyZoomAt(e.clientX - left, e.clientY - top, factor);
+    // Pass ABSOLUTE client coords to keep BG centered / no drift
+    applyZoomAt(e.clientX, e.clientY, factor);
   };
   const nudgeZoom = (m) => {
     if (!bgUrl) return;
@@ -1148,7 +1153,105 @@ export default function ImageCanvasApp() {
   };
 
   async function saveCompositionImage() {
-    // unchanged here; if you want exact “what-you-see” world snapshot, say the word
+    try {
+      if (!canvasRef.current) return;
+      const { bgDx, bgDy, dispW, dispH } = getRefFrame();
+      const exportOnlyBgArea = Boolean(bgUrl && dispW > 0 && dispH > 0);
+      const outW = exportOnlyBgArea
+        ? Math.max(1, round(dispW, 1))
+        : Math.max(1, Math.floor(canvasRef.current.getBoundingClientRect().width));
+      const outH = exportOnlyBgArea
+        ? Math.max(1, round(dispH, 1))
+        : Math.max(1, Math.floor(canvasRef.current.getBoundingClientRect().height));
+      const canvas = document.createElement("canvas");
+      const dpr = Math.max(1, Math.floor(num(window.devicePixelRatio, 1)));
+      canvas.width = outW * dpr;
+      canvas.height = outH * dpr;
+      canvas.style.width = `${outW}px`;
+      canvas.style.height = `${outH}px`;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.scale(dpr, dpr);
+      if (!exportOnlyBgArea) {
+        ctx.fillStyle = "#faf9f5";
+        ctx.fillRect(0, 0, outW, outH);
+      }
+      if (bgUrl && dispW > 0 && dispH > 0) {
+        await new Promise((resolve) => {
+          const img = new Image();
+          img.onload = () => {
+            const x = exportOnlyBgArea ? 0 : Math.round(num(bgDx));
+            const y = exportOnlyBgArea ? 0 : Math.round(num(bgDy));
+            ctx.drawImage(img, x, y, round(dispW, 1), round(dispH, 1));
+            resolve();
+          };
+          img.onerror = resolve;
+          img.src = bgUrl;
+        });
+      }
+      const { refW, refH } = getRefFrame();
+      const drawRects = (list, color) => {
+        ctx.save();
+        ctx.globalAlpha = 0.35;
+        ctx.fillStyle = color;
+        ctx.strokeStyle = color;
+        for (const r of list) {
+          const leftPx = round(num(r.fx) * refW),
+            topPx = round(num(r.fy) * refH);
+          const wPx = round(num(r.fw) * refW),
+            hPx = round(num(r.fh) * refH);
+          const drawX = exportOnlyBgArea ? leftPx - round(num(bgDx)) : leftPx;
+          const drawY = exportOnlyBgArea ? topPx - round(num(bgDy)) : topPx;
+          ctx.fillRect(drawX, drawY, wPx, hPx);
+          ctx.strokeRect(drawX, drawY, wPx, hPx);
+        }
+        ctx.restore();
+      };
+      drawRects(floors, "#0a28a0");
+      drawRects(walls, "#ff4da6");
+      drawRects(windows, "#00a050");
+
+      // draw items (SVGs)
+      for (const it of items) {
+        const node = document.getElementById(it.id);
+        if (!node) continue;
+        const svg = node.querySelector("svg");
+        if (!svg) continue;
+        const left0 = round(num(it.fx) * refW),
+          top0 = round(num(it.fy) * refH);
+        const left = exportOnlyBgArea ? left0 - round(num(bgDx)) : left0;
+        const top = exportOnlyBgArea ? top0 - round(num(bgDy)) : top0;
+        const cloneSvg = svg.cloneNode(true);
+        const svgStr = new XMLSerializer().serializeToString(cloneSvg);
+        const blob = new Blob([svgStr], { type: "image/svg+xml;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const sizePx = Math.max(16, Math.min(256, num(it.size || 48)));
+        await new Promise((resolve) => {
+          const img = new Image();
+          img.onload = () => {
+            ctx.drawImage(img, left, top, sizePx, sizePx);
+            URL.revokeObjectURL(url);
+            resolve();
+          };
+          img.onerror = () => {
+            URL.revokeObjectURL(url);
+            resolve();
+          };
+          img.src = url;
+        });
+      }
+      const a = document.createElement("a");
+      a.href = canvas.toDataURL("image/png");
+      a.download = exportOnlyBgArea
+        ? "composition-transparent.png"
+        : "composition.png";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (err) {
+      console.error("saveCompositionImage failed", err);
+      alert("Could not save the composition image.");
+    }
   }
 
   // undo/redo
@@ -1214,25 +1317,52 @@ export default function ImageCanvasApp() {
     if (ae && typeof ae.blur === "function" && ae !== document.body) ae.blur();
   };
 
-  // ---------- components (world frame; no handle rendering) ----------
+  const { refW, refH } = getRefFrame();
 
-  // keep the Handles component definition from your original file if you like,
-  // but DO NOT render it here.
+  /* ======================= components ======================= */
+  const Handles = ({ kind, r }) => {
+    if (!selecting) return null;
+    const leftPx = Math.round(num(r.fx) * refW),
+      topPx = Math.round(num(r.fy) * refH);
+    const wPx = Math.round(num(r.fw) * refW),
+      hPx = Math.round(num(r.fh) * refH);
+    const cx = leftPx + wPx / 2,
+      cy = topPx + hPx / 2;
+    const color = colorFor(kind);
+    const mk = (pos, st, cursor) => (
+      <div
+        key={pos}
+        role="button"
+        aria-label={`Resize ${pos}`}
+        style={{ ...styles.resizeHandle(color), ...st, cursor }}
+        onPointerDown={(e) => onShapeHandlePointerDown(e, kind, r.id, pos)}
+      />
+    );
+    return (
+      <>
+        {mk("nw", { left: leftPx - 4, top: topPx - 4 }, "nwse-resize")}
+        {mk("ne", { left: leftPx + wPx - 4, top: topPx - 4 }, "nesw-resize")}
+        {mk("sw", { left: leftPx - 4, top: topPx + hPx - 4 }, "nesw-resize")}
+        {mk("se", { left: leftPx + wPx - 4, top: topPx + hPx - 4 }, "nwse-resize")}
+        {mk("n", { left: cx - 4, top: topPx - 4 }, "ns-resize")}
+        {mk("s", { left: cx - 4, top: topPx + hPx - 4 }, "ns-resize")}
+        {mk("w", { left: leftPx - 4, top: cy - 4 }, "ew-resize")}
+        {mk("e", { left: leftPx + wPx - 4, top: cy - 4 }, "ew-resize")}
+      </>
+    );
+  };
 
   const RectLayer = ({ kind }) => {
     const list = getLayer(kind);
     const { fill, stroke } = COLORS[kind];
     const draftFill = fill.includes("0.35") ? fill.replace("0.35", "0.2") : fill;
-
-    const { dispW, dispH } = getBgFrame();
-
     return (
       <>
         {list.map((r) => {
-          const leftPx = Math.round(num(r.fx) * dispW);
-          const topPx  = Math.round(num(r.fy) * dispH);
-          const wPx    = Math.round(num(r.fw) * dispW);
-          const hPx    = Math.round(num(r.fh) * dispH);
+          const leftPx = Math.round(num(r.fx) * refW),
+            topPx = Math.round(num(r.fy) * refH);
+          const wPx = Math.round(num(r.fw) * refW),
+            hPx = Math.round(num(r.fh) * refH);
           const isWindow = kind === "window";
           return (
             <React.Fragment key={r.id}>
@@ -1246,13 +1376,14 @@ export default function ImageCanvasApp() {
                 }}
                 onPointerDown={(e) => onShapeBodyPointerDown(e, kind, r.id)}
                 onDoubleClick={(e) => {
-                  if (isWindow) {
+                  if (kind === "window") {
                     e.stopPropagation();
                     openWindowPrompt(r.id, r.heightCm);
                   }
                 }}
                 aria-label={kind}
               />
+              {/* Height label for windows (click to edit) */}
               {isWindow && typeof r.heightCm === "number" && (
                 <div
                   style={{ ...styles.windowTag, left: leftPx, top: topPx }}
@@ -1273,115 +1404,114 @@ export default function ImageCanvasApp() {
                   {`${r.heightCm} cm`}
                 </div>
               )}
-              {/* DO NOT render <Handles /> */}
+              <Handles kind={kind} r={r} />
             </React.Fragment>
           );
         })}
-        {activeTool === kind && selecting && draft && (() => {
-          const rr = normRect(draft.start.fx, draft.start.fy, draft.end.fx, draft.end.fy);
-          const l = Math.round(num(rr.fx) * dispW);
-          const t = Math.round(num(rr.fy) * dispH);
-          const w = Math.round(num(rr.fw) * dispW);
-          const h = Math.round(num(rr.fh) * dispH);
-          return (
+        {activeTool === kind &&
+          selecting &&
+          draft &&
+          (() => {
+            // Use UNCLAMPED draft so preview can go outside the image
+            const rr = normRectLoose(
+              draft.start.fx,
+              draft.start.fy,
+              draft.end.fx,
+              draft.end.fy
+            );
+            const l = Math.round(num(rr.fx) * refW),
+              t = Math.round(num(rr.fy) * refH);
+            const w = Math.round(num(rr.fw) * refW),
+              h = Math.round(num(rr.fh) * refH);
+            return (
+              <div
+                style={{
+                  ...styles.draft(draftFill, stroke),
+                  left: l,
+                  top: t,
+                  width: w,
+                  height: h,
+                }}
+              />
+            );
+          })()}
+      </>
+    );
+  };
+
+  const Items = () => (
+    <>
+      {items.map((it) => {
+        const left = Math.round(num(it.fx) * refW),
+          top = Math.round(num(it.fy) * refH);
+        const sizePx = Math.max(16, Math.min(256, num(it.size || 48)));
+        const scale = sizePx / 48;
+        return (
+          <React.Fragment key={it.id}>
             <div
+              id={it.id}
               style={{
-                ...styles.draft(draftFill, stroke),
-                left: l,
-                top: t,
-                width: w,
-                height: h,
+                ...styles.placed,
+                left,
+                top,
+                transform: `scale(${scale})`,
+                transformOrigin: "top left",
               }}
-            />
-          );
-        })()}
-      </>
-    );
-  };
-
-  const Items = () => {
-    const { dispW, dispH } = getBgFrame();
-    const zoom = num(bgSize.scale, 1);
-
-    return (
-      <>
-        {items.map((it) => {
-          const left = Math.round(num(it.fx) * dispW);
-          const top  = Math.round(num(it.fy) * dispH);
-
-          const base  = Math.max(16, Math.min(256, num(it.size || 48)));
-          const sizePx = base * zoom;
-          const scale  = sizePx / 48;
-
-          return (
-            <React.Fragment key={it.id}>
-              <div
-                id={it.id}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                onItemPointerDown(e, it.id);
+              }}
+              onClickCapture={(e) => e.stopPropagation()}
+              onDragStart={(e) => e.preventDefault()}
+              onDoubleClick={() => removeItem(it.id)}
+              title={`${it.type}`}
+              role="img"
+              aria-label={it.type}
+              tabIndex={-1}
+            >
+              {Icon[it.type]?.(48)}
+            </div>
+            <div
+              role="button"
+              aria-label="Resize"
+              style={{
+                position: "absolute",
+                left: left + sizePx - 6,
+                top: top + sizePx - 6,
+                zIndex: 11,
+                width: 16,
+                height: 16,
+                borderRadius: 8,
+                background: "#fff",
+                border: "1px solid rgba(0,0,0,0.3)",
+                boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+                display: "grid",
+                placeItems: "center",
+                cursor: "nwse-resize",
+                touchAction: "none",
+              }}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                onItemResizePointerDown(e, it.id);
+              }}
+              onClickCapture={(e) => e.stopPropagation()}
+            >
+              <span
                 style={{
-                  ...styles.placed,
-                  left,
-                  top,
-                  transform: `scale(${scale})`,
-                  transformOrigin: "top left",
+                  fontSize: 10,
+                  lineHeight: 1,
+                  userSelect: "none",
+                  pointerEvents: "none",
                 }}
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  onItemPointerDown(e, it.id);
-                }}
-                onClickCapture={(e) => e.stopPropagation()}
-                onDragStart={(e) => e.preventDefault()}
-                onDoubleClick={() => removeItem(it.id)}
-                title={`${it.type}`}
-                role="img"
-                aria-label={it.type}
-                tabIndex={-1}
               >
-                {Icon[it.type]?.(48)}
-              </div>
-
-              {/* small corner resize nub — remove if you don't want resizing at all */}
-              <div
-                role="button"
-                aria-label="Resize"
-                style={{
-                  position: "absolute",
-                  left: left + sizePx - 6,
-                  top: top + sizePx - 6,
-                  zIndex: 11,
-                  width: 16,
-                  height: 16,
-                  borderRadius: 8,
-                  background: "#fff",
-                  border: "1px solid rgba(0,0,0,0.3)",
-                  boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
-                  display: "grid",
-                  placeItems: "center",
-                  cursor: "nwse-resize",
-                  touchAction: "none",
-                }}
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  onItemResizePointerDown(e, it.id);
-                }}
-                onClickCapture={(e) => e.stopPropagation()}
-              >
-                <span
-                  style={{
-                    fontSize: 10,
-                    lineHeight: 1,
-                    userSelect: "none",
-                    pointerEvents: "none",
-                  }}
-                >
-                  ↘︎
-                </span>
-              </div>
-            </React.Fragment>
-          );
-        })}
-      </>
-    );
-  };
+                ↘︎
+              </span>
+            </div>
+          </React.Fragment>
+        );
+      })}
+    </>
+  );
 
   const ActiveLabel = activeTool
     ? activeTool === "wall"
@@ -1390,6 +1520,29 @@ export default function ImageCanvasApp() {
       ? "Windows"
       : "Floor"
     : "None";
+
+  const ImgWithSafeDims = () => {
+    const { dispW, dispH } = getDisplayDims();
+    const w = Math.max(1, dispW),
+      h = Math.max(1, dispH);
+    return (
+      <img
+        src={bgUrl}
+        alt="Background"
+        draggable={false}
+        onDragOver={onCanvasDragOver}
+        onDragEnter={onCanvasDragOver}
+        onDrop={onCanvasDrop}
+        style={{
+          width: w,
+          height: h,
+          objectFit: "contain",
+          background: "#fff",
+          borderRadius: 12,
+        }}
+      />
+    );
+  };
 
   return (
     <div style={styles.app} tabIndex={-1} onMouseDown={defocusActive}>
@@ -1512,14 +1665,15 @@ export default function ImageCanvasApp() {
         ))}
       </aside>
 
-      {/* canvas — WORLD WRAPPER keeps background centered, overlays can go outside */}
+      {/* canvas */}
       <div
         ref={canvasRef}
         style={{
           position: "relative",
           width: "100%",
           height: "100%",
-          display: "block",
+          display: "grid",
+          placeItems: "center",
         }}
         onDragEnter={onCanvasDragOver}
         onDragOver={onCanvasDragOver}
@@ -1531,70 +1685,30 @@ export default function ImageCanvasApp() {
         onPointerCancel={onCanvasPointerCancel}
         onWheel={onCanvasWheel}
       >
-        {(() => {
-          const { dx, dy, dispW, dispH } = getBgFrame();
-          if (!bgUrl) {
-            return (
-              <div
-                style={{
-                  position: "absolute",
-                  inset: 0,
-                  display: "grid",
-                  placeItems: "center",
-                  color: "#666",
-                }}
-              >
-                <div style={{ textAlign: "center" }}>
-                  <div style={{ fontSize: 18, marginBottom: 6 }}>
-                    Drop an image anywhere
-                  </div>
-                  <div style={{ fontSize: 13, marginBottom: 12, opacity: 0.8 }}>
-                    or
-                  </div>
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    style={styles.topChooseBtn}
-                  >
-                    Choose a file
-                  </button>
-                </div>
-              </div>
-            );
-          }
-          return (
-            <div
-              style={{
-                position: "absolute",
-                left: dx,
-                top: dy,
-                width: dispW,
-                height: dispH,
-              }}
-            >
-              {/* Background fills the world */}
-              <img
-                src={bgUrl}
-                alt="Background"
-                draggable={false}
-                onDragOver={onCanvasDragOver}
-                onDragEnter={onCanvasDragOver}
-                onDrop={onCanvasDrop}
-                style={{
-                  width: "100%",
-                  height: "100%",
-                  objectFit: "contain",
-                }}
-              />
-              {/* Overlays in the same world frame */}
-              <div style={{ position: "absolute", inset: 0 }}>
-                <RectLayer kind="floor" />
-                <RectLayer kind="wall" />
-                <RectLayer kind="window" />
-                <Items />
-              </div>
+        {bgUrl ? (
+          <ImgWithSafeDims />
+        ) : (
+          <div style={{ textAlign: "center", color: "#666" }}>
+            <div style={{ fontSize: 18, marginBottom: 6 }}>
+              Drop an image anywhere
             </div>
-          );
-        })()}
+            <div style={{ fontSize: 13, marginBottom: 12, opacity: 0.8 }}>
+              or
+            </div>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              style={styles.topChooseBtn}
+            >
+              Choose a file
+            </button>
+          </div>
+        )}
+
+        {/* layers order: floor → wall → window → items */}
+        <RectLayer kind="floor" />
+        <RectLayer kind="wall" />
+        <RectLayer kind="window" />
+        <Items />
       </div>
 
       {/* window height prompt */}
