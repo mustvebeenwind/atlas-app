@@ -1174,11 +1174,16 @@ async function saveCompositionImage() {
   try {
     if (!canvasRef.current) return;
 
-    // Use the full canvas container size (the on-screen viewport)
-    const { bgDx, bgDy, dispW, dispH, cw, ch } = getRefFrame();
-    const outW = Math.max(1, Math.floor(cw));
-    const outH = Math.max(1, Math.floor(ch));
+    // Background frame as currently displayed
+    const { bgDx, bgDy, dispW, dispH, refW, refH } = getRefFrame();
+    const outW = Math.max(1, round(dispW, 1));
+    const outH = Math.max(1, round(dispH, 1));
+    if (outW <= 0 || outH <= 0) {
+      alert("No background to export.");
+      return;
+    }
 
+    // Canvas sized exactly to the visible background area
     const canvas = document.createElement("canvas");
     const dpr = Math.max(1, Math.floor(num(window.devicePixelRatio, 1)));
     canvas.width = outW * dpr;
@@ -1190,17 +1195,17 @@ async function saveCompositionImage() {
     if (!ctx) return;
     ctx.scale(dpr, dpr);
 
-    // Fill viewport background (matches app bg)
-    ctx.fillStyle = "#faf9f5";
+    // Fill (optional—kept white for PNG background)
+    ctx.fillStyle = "#fff";
     ctx.fillRect(0, 0, outW, outH);
 
-    // Draw the background image exactly where it is on screen
-    if (bgUrl && dispW > 0 && dispH > 0) {
+    // 1) draw background image, fitted to visible area
+    if (bgUrl) {
       await new Promise((resolve) => {
         const img = new Image();
         img.onload = () => {
-          // bgDx/bgDy place the displayed image within the viewport
-          ctx.drawImage(img, Math.round(num(bgDx)), Math.round(num(bgDy)), round(dispW, 1), round(dispH, 1));
+          // We export just the visible bg rect, so draw it at (0,0) sized to dispW×dispH
+          ctx.drawImage(img, 0, 0, outW, outH);
           resolve();
         };
         img.onerror = resolve;
@@ -1208,39 +1213,38 @@ async function saveCompositionImage() {
       });
     }
 
-    // Use the viewport as the reference frame for overlays (matches on-screen)
-    const refW = cw;
-    const refH = ch;
-
-    // Draw rectangle layers (floor → wall → window) like on screen
+    // Helper: draw rect layers, offsetting by bgDx/bgDy so they align to the exported bg
     const drawRects = (list, color) => {
       ctx.save();
       ctx.globalAlpha = 0.35;
       ctx.fillStyle = color;
       ctx.strokeStyle = color;
       for (const r of list) {
-        const leftPx = round(num(r.fx) * refW);
-        const topPx = round(num(r.fy) * refH);
-        const wPx = round(num(r.fw) * refW);
-        const hPx = round(num(r.fh) * refH);
+        const leftPx = round(num(r.fx) * refW) - round(num(bgDx));
+        const topPx  = round(num(r.fy) * refH) - round(num(bgDy));
+        const wPx    = round(num(r.fw) * refW);
+        const hPx    = round(num(r.fh) * refH);
+        // Off-canvas parts auto-clip
         ctx.fillRect(leftPx, topPx, wPx, hPx);
         ctx.strokeRect(leftPx, topPx, wPx, hPx);
       }
       ctx.restore();
     };
-    drawRects(floors, "#0a28a0");
-    drawRects(walls, "#ff4da6");
-    drawRects(windows, "#00a050");
 
-    // Draw placed SVG items (bed/door/table/chair) at on-screen positions
+    // 2) overlay order: floor → wall → window
+    drawRects(floors, "#0a28a0");
+    drawRects(walls,  "#ff4da6");
+    drawRects(windows,"#00a050");
+
+    // 3) draw placed SVG items (bed/door/table/chair), offset to bg origin
     for (const it of items) {
       const node = document.getElementById(it.id);
       if (!node) continue;
       const svg = node.querySelector("svg");
       if (!svg) continue;
 
-      const left = round(num(it.fx) * refW);
-      const top = round(num(it.fy) * refH);
+      const left = round(num(it.fx) * refW) - round(num(bgDx));
+      const top  = round(num(it.fy) * refH) - round(num(bgDy));
       const sizePx = Math.max(16, Math.min(256, num(it.size || 48)));
 
       const cloneSvg = svg.cloneNode(true);
@@ -1263,10 +1267,10 @@ async function saveCompositionImage() {
       });
     }
 
-    // Download
+    // Download as PNG
     const a = document.createElement("a");
     a.href = canvas.toDataURL("image/png");
-    a.download = "canvas-snapshot.png";
+    a.download = "background-snapshot.png";
     document.body.appendChild(a);
     a.click();
     a.remove();
