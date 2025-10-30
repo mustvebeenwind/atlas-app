@@ -151,6 +151,9 @@ const normRectLoose = (fx0, fy0, fx1, fy1) => {
   return { fx: L, fy: T, fw: R - L, fh: B - T };
 };
 
+/* ======================= virtual world defaults ======================= */
+const DEFAULT_WORLD = { baseW: 1000, baseH: 700 };
+
 /* ======================= icons & data ======================= */
 const stroke = "#333";
 const S = {
@@ -475,8 +478,8 @@ export default function ImageCanvasApp() {
   const [bgUrl, setBgUrl] = useState(null);
   const lastBgUrlRef = useRef(null);
   const [bgSize, setBgSize] = useState({
-    baseW: 0,
-    baseH: 0,
+    baseW: DEFAULT_WORLD.baseW,
+    baseH: DEFAULT_WORLD.baseH,
     naturalW: 0,
     naturalH: 0,
     scale: 1,
@@ -510,7 +513,7 @@ export default function ImageCanvasApp() {
       windows: [],
       floors: [],
       bgUrl: null,
-      bgSize: { baseW: 0, baseH: 0, naturalW: 0, naturalH: 0, scale: 1 },
+      bgSize: { baseW: DEFAULT_WORLD.baseW, baseH: DEFAULT_WORLD.baseH, naturalW: 0, naturalH: 0, scale: 1 },
     },
   ]);
   const [hIndex, setHIndex] = useState(0);
@@ -613,21 +616,27 @@ export default function ImageCanvasApp() {
     else snapshotState(items, bgUrl, bgSize, walls, windows, next);
   };
 
-  /* ======================= frames (single world) ======================= */
+  /* ======================= frames (single world with defaults) ======================= */
   const getRefFrame = () => {
     const el = canvasRef.current;
     const { left, top, width: cw, height: ch } = getCanvasRect(el);
-    const baseW = num(bgSize.baseW);
-    const baseH = num(bgSize.baseH);
+
+    // Always have a valid world size (before/after upload)
+    const baseW = Math.max(1, num(bgSize.baseW) || DEFAULT_WORLD.baseW);
+    const baseH = Math.max(1, num(bgSize.baseH) || DEFAULT_WORLD.baseH);
+
     const scale = num(bgSize.scale, 1);
     const dispW = baseW * scale;
     const dispH = baseH * scale;
+
+    // Center world + apply pan — stable focal point on zoom
     const bgDx = Math.floor((cw - dispW) / 2) + Math.round(num(bgPan.x));
     const bgDy = Math.floor((ch - dispH) / 2) + Math.round(num(bgPan.y));
+
     return { left, top, cw, ch, baseW, baseH, scale, bgDx, bgDy, dispW, dispH, refW: baseW, refH: baseH };
   };
 
-  // Screen → fractional base coords (unclamped to allow drawing outside)
+  // Screen → fractional base coords (unclamped to allow outside image)
   const getRel = (x, y) => {
     const f = getRefFrame();
     return {
@@ -650,12 +659,10 @@ export default function ImageCanvasApp() {
         const base = isSquareish(naturalW, naturalH)
           ? { w: 300, h: 300 }
           : fitWithin(naturalW, naturalH, 500, 1000);
-        const baseW = base.w > 0 ? base.w : 300;
-        const baseH = base.h > 0 ? base.h : 300;
+        const baseW = base.w > 0 ? base.w : DEFAULT_WORLD.baseW;
+        const baseH = base.h > 0 ? base.h : DEFAULT_WORLD.baseH;
         if (lastBgUrlRef.current && lastBgUrlRef.current !== url) {
-          try {
-            URL.revokeObjectURL(lastBgUrlRef.current);
-          } catch {}
+          try { URL.revokeObjectURL(lastBgUrlRef.current); } catch {}
         }
         lastBgUrlRef.current = url;
         snapshotState(
@@ -674,9 +681,7 @@ export default function ImageCanvasApp() {
     const f = e?.target?.files?.[0];
     if (!f) return;
     onFile(f);
-    try {
-      e.target.value = "";
-    } catch {}
+    try { e.target.value = ""; } catch {}
   };
 
   // DnD (palette → canvas)
@@ -700,9 +705,7 @@ export default function ImageCanvasApp() {
   const onCanvasDragOver = (e) => {
     if (!e) return;
     e.preventDefault();
-    try {
-      if (e.dataTransfer) e.dataTransfer.dropEffect = "copy";
-    } catch {}
+    try { if (e.dataTransfer) e.dataTransfer.dropEffect = "copy"; } catch {}
   };
   const dropOnCanvas = (x, y, type) => {
     const { fx, fy } = getRel(x, y);
@@ -798,16 +801,11 @@ export default function ImageCanvasApp() {
     const raw = (windowPrompt.value ?? "").toString().trim().replace(",", ".");
     const val = Number(raw);
     if (!Number.isFinite(val) || val < 0) {
-      setWindowPrompt((p) => ({
-        ...p,
-        error: "Please enter a non-negative number (cm).",
-      }));
+      setWindowPrompt((p) => ({ ...p, error: "Please enter a non-negative number (cm)." }));
       return;
     }
     setWindows((prev) => {
-      const next = prev.map((w) =>
-        w.id === windowPrompt.id ? { ...w, heightCm: val } : w
-      );
+      const next = prev.map((w) => (w.id === windowPrompt.id ? { ...w, heightCm: val } : w));
       snapshotLayer("window", next);
       return next;
     });
@@ -915,10 +913,7 @@ export default function ImageCanvasApp() {
       setItems((p) =>
         p.map((it) =>
           it.id === drag.id
-            ? merge(it, {
-                fx: (num(fx) - num(drag.offsetFx)),
-                fy: (num(fy) - num(drag.offsetFy)),
-              })
+            ? merge(it, { fx: (num(fx) - num(drag.offsetFx)), fy: (num(fy) - num(drag.offsetFy)) })
             : it
         )
       );
@@ -1044,14 +1039,14 @@ export default function ImageCanvasApp() {
     });
   };
   const onCanvasWheel = (e) => {
-    if (!bgUrl || !(e.shiftKey || e.ctrlKey)) return;
+    // Allow zoom even without bg image (virtual world active)
+    if (!(e.shiftKey || e.ctrlKey)) return;
     e.preventDefault();
     const step = e.shiftKey && e.ctrlKey ? 0.15 : 0.1;
     const factor = 1 + (e.deltaY < 0 ? 1 : -1) * step;
     applyZoomAt(e.clientX, e.clientY, factor); // absolute coords
   };
   const nudgeZoom = (m) => {
-    if (!bgUrl) return;
     const { left, top, width, height } = getCanvasRect(canvasRef.current);
     applyZoomAt(left + width / 2, top + height / 2, m);
   };
@@ -1060,11 +1055,8 @@ export default function ImageCanvasApp() {
   const clearAll = () => snapshotState([], bgUrl, bgSize, [], [], []);
   const removeItem = (id) => snapshotItems(items.filter((it) => it.id !== id));
   const clearBackground = () => {
-    const reset = { baseW: 0, baseH: 0, naturalW: 0, naturalH: 0, scale: 1 };
-    if (lastBgUrlRef.current) {
-      try { URL.revokeObjectURL(lastBgUrlRef.current); } catch {}
-      lastBgUrlRef.current = null;
-    }
+    const reset = { baseW: DEFAULT_WORLD.baseW, baseH: DEFAULT_WORLD.baseH, naturalW: 0, naturalH: 0, scale: 1 };
+    if (lastBgUrlRef.current) { try { URL.revokeObjectURL(lastBgUrlRef.current); } catch {} lastBgUrlRef.current = null; }
     snapshotState(items, null, reset, walls, windows, floors);
   };
 
@@ -1072,7 +1064,7 @@ export default function ImageCanvasApp() {
     try {
       if (!canvasRef.current) return;
       const { bgDx, bgDy, dispW, dispH, refW, refH } = getRefFrame();
-      const exportOnlyBgArea = Boolean(bgUrl && dispW > 0 && dispH > 0);
+      const exportOnlyBgArea = Boolean(dispW > 0 && dispH > 0);
 
       const outW = exportOnlyBgArea
         ? Math.max(1, round(dispW, 1))
@@ -1091,19 +1083,16 @@ export default function ImageCanvasApp() {
       if (!ctx) return;
       ctx.scale(dpr, dpr);
 
-      if (!exportOnlyBgArea) {
-        ctx.fillStyle = "#faf9f5";
-        ctx.fillRect(0, 0, outW, outH);
-      }
+      // Background of export (white) if no image fills the shot
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, outW, outH);
 
-      // draw BG
+      // draw BG image if present
       if (bgUrl && dispW > 0 && dispH > 0) {
         await new Promise((resolve) => {
           const img = new Image();
           img.onload = () => {
-            const x = exportOnlyBgArea ? 0 : Math.round(num(bgDx));
-            const y = exportOnlyBgArea ? 0 : Math.round(num(bgDy));
-            ctx.drawImage(img, x, y, round(dispW, 1), round(dispH, 1));
+            ctx.drawImage(img, 0, 0, round(dispW, 1), round(dispH, 1));
             resolve();
           };
           img.onerror = resolve;
@@ -1118,18 +1107,13 @@ export default function ImageCanvasApp() {
         ctx.fillStyle = color;
         ctx.strokeStyle = color;
         for (const r of list) {
-          // convert base coords → screen (same math as world)
-          const leftPx = round(num(r.fx) * refW);
-          const topPx  = round(num(r.fy) * refH);
+          // convert base coords → world pixels, then into export area
+          const leftPx = round(num(r.fx) * refW) - round(num(bgDx));
+          const topPx  = round(num(r.fy) * refH) - round(num(bgDy));
           const wPx    = round(num(r.fw) * refW);
           const hPx    = round(num(r.fh) * refH);
-
-          // account for world transform when exporting only BG area
-          const drawX = exportOnlyBgArea ? leftPx - round(num(bgDx)) : leftPx;
-          const drawY = exportOnlyBgArea ? topPx  - round(num(bgDy)) : topPx;
-
-          ctx.fillRect(drawX, drawY, wPx, hPx);
-          ctx.strokeRect(drawX, drawY, wPx, hPx);
+          ctx.fillRect(leftPx, topPx, wPx, hPx);
+          ctx.strokeRect(leftPx, topPx, wPx, hPx);
         }
         ctx.restore();
       };
@@ -1145,10 +1129,8 @@ export default function ImageCanvasApp() {
         const svg = node.querySelector("svg");
         if (!svg) continue;
 
-        const left0 = round(num(it.fx) * refW);
-        const top0  = round(num(it.fy) * refH);
-        const left  = exportOnlyBgArea ? left0 - round(num(bgDx)) : left0;
-        const top   = exportOnlyBgArea ? top0  - round(num(bgDy)) : top0;
+        const left0 = round(num(it.fx) * refW) - round(num(bgDx));
+        const top0  = round(num(it.fy) * refH) - round(num(bgDy));
 
         const cloneSvg = svg.cloneNode(true);
         const svgStr = new XMLSerializer().serializeToString(cloneSvg);
@@ -1159,7 +1141,7 @@ export default function ImageCanvasApp() {
         await new Promise((resolve) => {
           const img = new Image();
           img.onload = () => {
-            ctx.drawImage(img, left, top, sizePx, sizePx);
+            ctx.drawImage(img, left0, top0, sizePx, sizePx);
             URL.revokeObjectURL(url);
             resolve();
           };
@@ -1170,7 +1152,7 @@ export default function ImageCanvasApp() {
 
       const a = document.createElement("a");
       a.href = canvas.toDataURL("image/png");
-      a.download = exportOnlyBgArea ? "composition-transparent.png" : "composition.png";
+      a.download = "composition.png";
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -1421,10 +1403,7 @@ export default function ImageCanvasApp() {
     : "None";
 
   return (
-    <div style={styles.app} tabIndex={-1} onMouseDown={() => {
-      const ae = document.activeElement;
-      if (ae && typeof ae.blur === "function" && ae !== document.body) ae.blur();
-    }}>
+    <div style={styles.app} tabIndex={-1} onMouseDown={defocusActive}>
       {/* toolbar */}
       <div style={styles.floaterBar}>
         <button aria-label="Save as image" style={styles.floaterBtn} title="Save as image" onClick={saveCompositionImage}>⬇️</button>
@@ -1481,10 +1460,11 @@ export default function ImageCanvasApp() {
         onPointerCancel={onCanvasPointerCancel}
         onWheel={onCanvasWheel}
       >
-        {bgUrl ? (
-          (() => {
-            const { bgDx, bgDy, baseW, baseH, scale } = getRefFrame();
-            return (
+        {(() => {
+          const { bgDx, bgDy, baseW, baseH, scale } = getRefFrame();
+          return (
+            <>
+              {/* Transformed world: EVERYTHING (bg + shapes + icons) lives here */}
               <div
                 style={{
                   position: "absolute",
@@ -1495,38 +1475,56 @@ export default function ImageCanvasApp() {
                   transform: `scale(${scale})`,
                   transformOrigin: "top left",
                   pointerEvents: "none", // children re-enable where needed
+                  background: !bgUrl ? "#fff" : "transparent",
+                  outline: !bgUrl ? "1px dashed rgba(0,0,0,0.15)" : "none",
                 }}
               >
-                <img
-                  src={bgUrl}
-                  alt="Background"
-                  draggable={false}
-                  style={{
-                    position: "absolute",
-                    left: 0,
-                    top: 0,
-                    width: baseW,
-                    height: baseH,
-                    background: "#fff",
-                  }}
-                />
+                {/* Background image (optional) */}
+                {bgUrl && (
+                  <img
+                    src={bgUrl}
+                    alt="Background"
+                    draggable={false}
+                    style={{
+                      position: "absolute",
+                      left: 0,
+                      top: 0,
+                      width: baseW,
+                      height: baseH,
+                      background: "#fff",
+                    }}
+                  />
+                )}
+
                 {/* layers order: floor → wall → window → items */}
                 <RectLayer kind="floor" />
                 <RectLayer kind="wall" />
                 <RectLayer kind="window" />
                 <Items />
               </div>
-            );
-          })()
-        ) : (
-          <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "#666" }}>
-            <div style={{ textAlign: "center" }}>
-              <div style={{ fontSize: 18, marginBottom: 6 }}>Drop an image anywhere</div>
-              <div style={{ fontSize: 13, marginBottom: 12, opacity: 0.8 }}>or</div>
-              <button onClick={() => fileInputRef.current?.click()} style={styles.topChooseBtn}>Choose a file</button>
-            </div>
-          </div>
-        )}
+
+              {/* Friendly hint overlay; does not block interaction */}
+              {!bgUrl && (
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    display: "grid",
+                    placeItems: "center",
+                    pointerEvents: "none",
+                    color: "#666",
+                  }}
+                >
+                  <div style={{ textAlign: "center", pointerEvents: "auto" }}>
+                    <div style={{ fontSize: 18, marginBottom: 6 }}>Drop an image anywhere</div>
+                    <div style={{ fontSize: 13, marginBottom: 12, opacity: 0.8 }}>or</div>
+                    <button onClick={() => fileInputRef.current?.click()} style={styles.topChooseBtn}>Choose a file</button>
+                  </div>
+                </div>
+              )}
+            </>
+          );
+        })()}
       </div>
 
       {/* window height prompt */}
@@ -1575,4 +1573,3 @@ export default function ImageCanvasApp() {
     </div>
   );
 }
-
