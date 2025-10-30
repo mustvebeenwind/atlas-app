@@ -1754,6 +1754,27 @@ export default function ImageCanvasApp() {
             Tip: you can enter decimals (e.g., 37.5)
           </div>
         </form>
+        {/* undo / redo buttons */}
+        <div style={styles.undoRedoBar}>
+            <button
+              style={styles.undoRedoBtn(canUndo)}
+              disabled={!canUndo}
+              onClick={undo}
+              aria-label="Undo"
+              title="Undo (Ctrl/Cmd+Z)"
+            >
+              ↶ Undo
+            </button>
+            <button
+              style={styles.undoRedoBtn(canRedo)}
+              disabled={!canRedo}
+              onClick={redo}
+              aria-label="Redo"
+              title="Redo (Ctrl+Shift+Z / Ctrl+Y)"
+            >
+              ↷ Redo
+            </button>
+          </div>
       )}
     </div>
   );
