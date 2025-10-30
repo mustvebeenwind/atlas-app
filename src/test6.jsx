@@ -3,9 +3,9 @@ import React, { useRef, useState, useEffect } from "react";
 /**
  * AtlaS – React Image Canvas (pure JSX)
  * • Walls (pink), Windows (green), Floor (dark blue)
- * • Right-center Select menu + Stop selecting (hides 8 handles)
+ * • Right-center Select menu + Stop selecting
  * • Windows: prompt for height above ground (cm) on create; show/editable label near rectangle
- * • Drag icons from palette, zoom/pan, undo/redo, export PNG
+ * • Drag icons from palette, pan/zoom (everything), undo/redo, export PNG
  *
  * Hardened to avoid React error #62:
  *  - Robust merge() that only merges plain objects
@@ -142,7 +142,6 @@ const normRect = (fx0, fy0, fx1, fy1) => {
     y1 = clamp01(Math.max(fy0, fy1));
   return { fx: x0, fy: y0, fw: clamp01(x1 - x0), fh: clamp01(y1 - y0) };
 };
-
 // Like normRect but WITHOUT clamping — lets shapes exist outside [0,1]
 const normRectLoose = (fx0, fy0, fx1, fy1) => {
   const L = Math.min(num(fx0), num(fx1));
@@ -404,7 +403,7 @@ const styles = {
     position: "absolute",
     background: b,
     border: `2px solid ${s}`,
-    borderRadius: 4,
+    borderRadius: 0, // square corners
     pointerEvents: "auto",
     cursor: "move",
   }),
@@ -412,17 +411,16 @@ const styles = {
     position: "absolute",
     background: b,
     border: `2px dashed ${s}`,
-    borderRadius: 4,
+    borderRadius: 0, // square corners
     pointerEvents: "none",
   }),
-  // smaller 8×8 handles
   resizeHandle: (color) => ({
     position: "absolute",
     width: 8,
     height: 8,
     background: "#fff",
     border: `2px solid ${color}`,
-    borderRadius: 3,
+    borderRadius: 0, // square
     boxShadow: "0 1px 2px rgba(0,0,0,0.15)",
     zIndex: 3,
     touchAction: "none",
@@ -499,7 +497,6 @@ export default function ImageCanvasApp() {
   const [selectOpen, setSelectOpen] = useState(false);
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [showInfo, setShowInfo] = useState(false);
   const [, forceResizeTick] = useState(0);
 
   // window height prompt after placing a window
@@ -554,7 +551,7 @@ export default function ImageCanvasApp() {
     startLayer: null,
   });
 
-  // audio
+  // audio (bell once on load / first gesture)
   const audioCtxRef = useRef(null);
   const bellPlayedRef = useRef(false);
   useEffect(() => {
@@ -616,43 +613,28 @@ export default function ImageCanvasApp() {
     else snapshotState(items, bgUrl, bgSize, walls, windows, next);
   };
 
-  // frames
-  const getDisplayDims = () => ({
-    dispW: Math.max(0, round(num(bgSize.baseW) * num(bgSize.scale, 1))),
-    dispH: Math.max(0, round(num(bgSize.baseH) * num(bgSize.scale, 1))),
-  });
-  const getBgFrame = () => {
-    const el = canvasRef.current;
-    const { width: cw, height: ch, left, top } = getCanvasRect(el);
-    const { dispW, dispH } = getDisplayDims();
-    const dx = Math.floor((cw - dispW) / 2) + Math.round(num(bgPan.x));
-    const dy = Math.floor((ch - dispH) / 2) + Math.round(num(bgPan.y));
-    return { dx, dy, left, top, cw, ch, dispW, dispH };
-  };
+  /* ======================= frames (single world) ======================= */
   const getRefFrame = () => {
-    const f = getBgFrame();
-    return {
-      dx: 0,
-      dy: 0,
-      left: f.left,
-      top: f.top,
-      refW: f.cw,
-      refH: f.ch,
-      cw: f.cw,
-      ch: f.ch,
-      bgDx: f.dx,
-      bgDy: f.dy,
-      dispW: f.dispW,
-      dispH: f.dispH,
-    };
+    const el = canvasRef.current;
+    const { left, top, width: cw, height: ch } = getCanvasRect(el);
+    const baseW = num(bgSize.baseW);
+    const baseH = num(bgSize.baseH);
+    const scale = num(bgSize.scale, 1);
+    const dispW = baseW * scale;
+    const dispH = baseH * scale;
+    const bgDx = Math.floor((cw - dispW) / 2) + Math.round(num(bgPan.x));
+    const bgDy = Math.floor((ch - dispH) / 2) + Math.round(num(bgPan.y));
+    return { left, top, cw, ch, baseW, baseH, scale, bgDx, bgDy, dispW, dispH, refW: baseW, refH: baseH };
   };
+
+  // Screen → fractional base coords (unclamped to allow drawing outside)
   const getRel = (x, y) => {
-    const { dx, dy, left, top, refW, refH } = getRefFrame();
+    const f = getRefFrame();
     return {
-      fx: (x - (left + dx)) / (refW || 1), // NOTE: no clamp to allow outside
-      fy: (y - (top + dy)) / (refH || 1),
-      refW,
-      refH,
+      fx: (x - (f.left + f.bgDx)) / (f.baseW * f.scale),
+      fy: (y - (f.top + f.bgDy)) / (f.baseH * f.scale),
+      refW: f.baseW,
+      refH: f.baseH,
     };
   };
 
@@ -798,7 +780,7 @@ export default function ImageCanvasApp() {
       setDraft({ start: { fx, fy }, end: { fx, fy } });
       return;
     }
-    // Use UNCLAMPED rect so you can draw outside the image
+    // UNCLAMPED rectangle (can extend outside image area)
     const r = normRectLoose(draft.start.fx, draft.start.fy, fx, fy);
     const id = `${activeTool}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     const next = [...getLayer(activeTool), { id, ...r }];
@@ -883,61 +865,27 @@ export default function ImageCanvasApp() {
     if (rs.id) {
       const { fx, fy } = getRel(e.clientX, e.clientY);
       const s = rs.start;
-      let L = s.fx,
-        T = s.fy,
-        R = s.fx + s.fw,
-        B = s.fy + s.fh;
+      let L = s.fx, T = s.fy, R = s.fx + s.fw, B = s.fy + s.fh;
       const ce = (v) => clamp01(num(v));
       (
         {
-          nw: () => {
-            L = ce(fx);
-            T = ce(fy);
-          },
-          ne: () => {
-            R = ce(fx);
-            T = ce(fy);
-          },
-          sw: () => {
-            L = ce(fx);
-            B = ce(fy);
-          },
-          se: () => {
-            R = ce(fx);
-            B = ce(fy);
-          },
-          n: () => {
-            T = ce(fy);
-          },
-          s: () => {
-            B = ce(fy);
-          },
-          w: () => {
-            L = ce(fx);
-          },
-          e: () => {
-            R = ce(fx);
-          },
+          nw: () => { L = ce(fx); T = ce(fy); },
+          ne: () => { R = ce(fx); T = ce(fy); },
+          sw: () => { L = ce(fx); B = ce(fy); },
+          se: () => { R = ce(fx); B = ce(fy); },
+          n:  () => { T = ce(fy); },
+          s:  () => { B = ce(fy); },
+          w:  () => { L = ce(fx); },
+          e:  () => { R = ce(fx); },
         }[rs.handle] || (() => {})
       )();
       L = Math.max(0, Math.min(L, 1));
       R = Math.max(0, Math.min(R, 1));
       T = Math.max(0, Math.min(T, 1));
       B = Math.max(0, Math.min(B, 1));
-      if (R - L < MIN_SIDE) {
-        if (rs.handle.includes("w")) L = R - MIN_SIDE;
-        else R = L + MIN_SIDE;
-      }
-      if (B - T < MIN_SIDE) {
-        if (rs.handle.includes("n")) T = B - MIN_SIDE;
-        else B = T + MIN_SIDE;
-      }
-      const nxt = {
-        fx: Math.min(L, R),
-        fy: Math.min(T, B),
-        fw: Math.abs(R - L),
-        fh: Math.abs(B - T),
-      };
+      if (R - L < MIN_SIDE) { if (rs.handle.includes("w")) L = R - MIN_SIDE; else R = L + MIN_SIDE; }
+      if (B - T < MIN_SIDE) { if (rs.handle.includes("n")) T = B - MIN_SIDE; else B = T + MIN_SIDE; }
+      const nxt = { fx: Math.min(L, R), fy: Math.min(T, B), fw: Math.abs(R - L), fh: Math.abs(B - T) };
       setLayer(rs.kind, (prev) => prev.map((r) => (r.id === rs.id ? merge(r, nxt) : r)));
       return;
     }
@@ -951,12 +899,12 @@ export default function ImageCanvasApp() {
       setItems((p) => p.map((x) => (x.id === rsz.id ? merge(x, { size }) : x)));
       return;
     }
-    // shape drag
+    // shape drag (unclamped)
     const sd = shapeDraggingRef.current;
     if (sd.id) {
       const { fx, fy } = getRel(e.clientX, e.clientY);
-      let nx = (num(fx) - num(sd.offsetFx));
-      let ny = (num(fy) - num(sd.offsetFy));
+      const nx = (num(fx) - num(sd.offsetFx));
+      const ny = (num(fy) - num(sd.offsetFy));
       setLayer(sd.kind, (p) => p.map((r) => (r.id === sd.id ? merge(r, { fx: nx, fy: ny }) : r)));
       return;
     }
@@ -994,18 +942,14 @@ export default function ImageCanvasApp() {
       pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (pointersRef.current.size === 2) {
         const [p1, p2] = Array.from(pointersRef.current.values());
-        const midX = (p1.x + p2.x) / 2,
-          midY = (p1.y + p2.y) / 2;
+        const midX = (p1.x + p2.x) / 2, midY = (p1.y + p2.y) / 2;
         const dist = Math.hypot(p1.x - p2.x, p1.y - p2.y);
         if (!onCanvasPointerMove._lastDist) onCanvasPointerMove._lastDist = dist;
         const factor = dist / onCanvasPointerMove._lastDist;
         if (factor > 0 && !Number.isNaN(factor)) {
           applyZoomAt(midX, midY, factor);
           const prev = onCanvasPointerMove._lastMid || { x: midX, y: midY };
-          setBgPan((p) => ({
-            x: p.x + (midX - prev.x),
-            y: p.y + (midY - prev.y),
-          }));
+          setBgPan((p) => ({ x: p.x + (midX - prev.x), y: p.y + (midY - prev.y) }));
           onCanvasPointerMove._lastMid = { x: midX, y: midY };
         }
         onCanvasPointerMove._lastDist = dist;
@@ -1017,16 +961,9 @@ export default function ImageCanvasApp() {
     const rs = shapeResizingRef.current;
     if (rs.id) {
       const before = rs.startLayer;
-      shapeResizingRef.current = {
-        kind: null,
-        id: null,
-        handle: null,
-        start: null,
-        startLayer: null,
-      };
+      shapeResizingRef.current = { kind: null, id: null, handle: null, start: null, startLayer: null };
       const after = getLayer(rs.kind);
-      if (before && JSON.stringify(before) !== JSON.stringify(after))
-        snapshotLayer(rs.kind, after);
+      if (before && JSON.stringify(before) !== JSON.stringify(after)) snapshotLayer(rs.kind, after);
     }
     const rsz = resizingRef.current;
     if (rsz.id) {
@@ -1038,18 +975,9 @@ export default function ImageCanvasApp() {
     const sd = shapeDraggingRef.current;
     if (sd.id) {
       const before = sd.start;
-      shapeDraggingRef.current = {
-        kind: null,
-        id: null,
-        offsetFx: 0,
-        offsetFy: 0,
-        fw: 0,
-        fh: 0,
-        start: null,
-      };
+      shapeDraggingRef.current = { kind: null, id: null, offsetFx: 0, offsetFy: 0, fw: 0, fh: 0, start: null };
       const after = getLayer(sd.kind);
-      if (before && JSON.stringify(before) !== JSON.stringify(after))
-        snapshotLayer(sd.kind, after);
+      if (before && JSON.stringify(before) !== JSON.stringify(after)) snapshotLayer(sd.kind, after);
     }
     const drag = draggingRef.current;
     if (drag.id != null) {
@@ -1058,10 +986,7 @@ export default function ImageCanvasApp() {
       if (JSON.stringify(before) !== JSON.stringify(items)) snapshotItems(items);
       dragStartSnapshotRef.current = null;
     }
-    if (panDragRef.current.active) {
-      panDragRef.current.active = false;
-      scheduleBgSnapshot();
-    }
+    if (panDragRef.current.active) { panDragRef.current.active = false; scheduleBgSnapshot(); }
     pointersRef.current.delete(e.pointerId);
     onCanvasPointerMove._lastDist = null;
     onCanvasPointerMove._lastMid = null;
@@ -1072,13 +997,7 @@ export default function ImageCanvasApp() {
     panDragRef.current.active = false;
     onCanvasPointerMove._lastDist = null;
     onCanvasPointerMove._lastMid = null;
-    shapeResizingRef.current = {
-      kind: null,
-      id: null,
-      handle: null,
-      start: null,
-      startLayer: null,
-    };
+    shapeResizingRef.current = { kind: null, id: null, handle: null, start: null, startLayer: null };
   };
   const onCanvasPointerDown = (e) => {
     if (e.pointerType === "touch")
@@ -1107,13 +1026,13 @@ export default function ImageCanvasApp() {
     const f = num(factor, 1);
     setBgSize((s) => {
       const nextScale = Math.min(5, Math.max(0.2, num(s.scale, 1) * f));
-      const dispW = num(s.baseW) * num(s.scale, 1),
-        dispH = num(s.baseH) * num(s.scale, 1);
+      const dispW = num(s.baseW) * num(s.scale, 1);
+      const dispH = num(s.baseH) * num(s.scale, 1);
       const { left, top, width: cw, height: ch } = getCanvasRect(canvasRef.current);
       const beforeDx = Math.floor((cw - dispW) / 2) + Math.round(num(bgPan.x));
       const beforeDy = Math.floor((ch - dispH) / 2) + Math.round(num(bgPan.y));
-      const offsetX = screenX - (left + beforeDx),
-        offsetY = screenY - (top + beforeDy);
+      const offsetX = screenX - (left + beforeDx);
+      const offsetY = screenY - (top + beforeDy);
       const scaleRatio = nextScale / num(s.scale, 1);
       setBgPan((p) => ({
         x: num(p.x) - offsetX * (scaleRatio - 1),
@@ -1129,8 +1048,7 @@ export default function ImageCanvasApp() {
     e.preventDefault();
     const step = e.shiftKey && e.ctrlKey ? 0.15 : 0.1;
     const factor = 1 + (e.deltaY < 0 ? 1 : -1) * step;
-    // Pass ABSOLUTE client coords to keep BG centered / no drift
-    applyZoomAt(e.clientX, e.clientY, factor);
+    applyZoomAt(e.clientX, e.clientY, factor); // absolute coords
   };
   const nudgeZoom = (m) => {
     if (!bgUrl) return;
@@ -1144,9 +1062,7 @@ export default function ImageCanvasApp() {
   const clearBackground = () => {
     const reset = { baseW: 0, baseH: 0, naturalW: 0, naturalH: 0, scale: 1 };
     if (lastBgUrlRef.current) {
-      try {
-        URL.revokeObjectURL(lastBgUrlRef.current);
-      } catch {}
+      try { URL.revokeObjectURL(lastBgUrlRef.current); } catch {}
       lastBgUrlRef.current = null;
     }
     snapshotState(items, null, reset, walls, windows, floors);
@@ -1155,14 +1071,16 @@ export default function ImageCanvasApp() {
   async function saveCompositionImage() {
     try {
       if (!canvasRef.current) return;
-      const { bgDx, bgDy, dispW, dispH } = getRefFrame();
+      const { bgDx, bgDy, dispW, dispH, refW, refH } = getRefFrame();
       const exportOnlyBgArea = Boolean(bgUrl && dispW > 0 && dispH > 0);
+
       const outW = exportOnlyBgArea
         ? Math.max(1, round(dispW, 1))
         : Math.max(1, Math.floor(canvasRef.current.getBoundingClientRect().width));
       const outH = exportOnlyBgArea
         ? Math.max(1, round(dispH, 1))
         : Math.max(1, Math.floor(canvasRef.current.getBoundingClientRect().height));
+
       const canvas = document.createElement("canvas");
       const dpr = Math.max(1, Math.floor(num(window.devicePixelRatio, 1)));
       canvas.width = outW * dpr;
@@ -1172,10 +1090,13 @@ export default function ImageCanvasApp() {
       const ctx = canvas.getContext("2d");
       if (!ctx) return;
       ctx.scale(dpr, dpr);
+
       if (!exportOnlyBgArea) {
         ctx.fillStyle = "#faf9f5";
         ctx.fillRect(0, 0, outW, outH);
       }
+
+      // draw BG
       if (bgUrl && dispW > 0 && dispH > 0) {
         await new Promise((resolve) => {
           const img = new Image();
@@ -1189,43 +1110,52 @@ export default function ImageCanvasApp() {
           img.src = bgUrl;
         });
       }
-      const { refW, refH } = getRefFrame();
+
+      // helper to draw rect layers
       const drawRects = (list, color) => {
         ctx.save();
         ctx.globalAlpha = 0.35;
         ctx.fillStyle = color;
         ctx.strokeStyle = color;
         for (const r of list) {
-          const leftPx = round(num(r.fx) * refW),
-            topPx = round(num(r.fy) * refH);
-          const wPx = round(num(r.fw) * refW),
-            hPx = round(num(r.fh) * refH);
+          // convert base coords → screen (same math as world)
+          const leftPx = round(num(r.fx) * refW);
+          const topPx  = round(num(r.fy) * refH);
+          const wPx    = round(num(r.fw) * refW);
+          const hPx    = round(num(r.fh) * refH);
+
+          // account for world transform when exporting only BG area
           const drawX = exportOnlyBgArea ? leftPx - round(num(bgDx)) : leftPx;
-          const drawY = exportOnlyBgArea ? topPx - round(num(bgDy)) : topPx;
+          const drawY = exportOnlyBgArea ? topPx  - round(num(bgDy)) : topPx;
+
           ctx.fillRect(drawX, drawY, wPx, hPx);
           ctx.strokeRect(drawX, drawY, wPx, hPx);
         }
         ctx.restore();
       };
-      drawRects(floors, "#0a28a0");
-      drawRects(walls, "#ff4da6");
-      drawRects(windows, "#00a050");
 
-      // draw items (SVGs)
+      drawRects(floors, "#0a28a0");
+      drawRects(walls,  "#ff4da6");
+      drawRects(windows,"#00a050");
+
+      // draw items (SVGs) at base coords
       for (const it of items) {
         const node = document.getElementById(it.id);
         if (!node) continue;
         const svg = node.querySelector("svg");
         if (!svg) continue;
-        const left0 = round(num(it.fx) * refW),
-          top0 = round(num(it.fy) * refH);
-        const left = exportOnlyBgArea ? left0 - round(num(bgDx)) : left0;
-        const top = exportOnlyBgArea ? top0 - round(num(bgDy)) : top0;
+
+        const left0 = round(num(it.fx) * refW);
+        const top0  = round(num(it.fy) * refH);
+        const left  = exportOnlyBgArea ? left0 - round(num(bgDx)) : left0;
+        const top   = exportOnlyBgArea ? top0  - round(num(bgDy)) : top0;
+
         const cloneSvg = svg.cloneNode(true);
         const svgStr = new XMLSerializer().serializeToString(cloneSvg);
         const blob = new Blob([svgStr], { type: "image/svg+xml;charset=utf-8" });
         const url = URL.createObjectURL(blob);
         const sizePx = Math.max(16, Math.min(256, num(it.size || 48)));
+
         await new Promise((resolve) => {
           const img = new Image();
           img.onload = () => {
@@ -1233,18 +1163,14 @@ export default function ImageCanvasApp() {
             URL.revokeObjectURL(url);
             resolve();
           };
-          img.onerror = () => {
-            URL.revokeObjectURL(url);
-            resolve();
-          };
+          img.onerror = () => { URL.revokeObjectURL(url); resolve(); };
           img.src = url;
         });
       }
+
       const a = document.createElement("a");
       a.href = canvas.toDataURL("image/png");
-      a.download = exportOnlyBgArea
-        ? "composition-transparent.png"
-        : "composition.png";
+      a.download = exportOnlyBgArea ? "composition-transparent.png" : "composition.png";
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -1281,27 +1207,16 @@ export default function ImageCanvasApp() {
   };
 
   // shortcuts + resize
-  const undoRef = useRef(undo),
-    redoRef = useRef(redo);
-  useEffect(() => {
-    undoRef.current = undo;
-    redoRef.current = redo;
-  });
+  const undoRef = useRef(undo), redoRef = useRef(redo);
+  useEffect(() => { undoRef.current = undo; redoRef.current = redo; });
   useEffect(() => {
     const onKeyDown = (e) => {
       const mod = e.ctrlKey || e.metaKey;
       if (!mod) return;
       const k = e.key.toLowerCase();
-      if (k === "z" && !e.shiftKey) {
-        e.preventDefault();
-        undoRef.current();
-      } else if (k === "z" && e.shiftKey) {
-        e.preventDefault();
-        redoRef.current();
-      } else if (k === "y") {
-        e.preventDefault();
-        redoRef.current();
-      }
+      if (k === "z" && !e.shiftKey) { e.preventDefault(); undoRef.current(); }
+      else if (k === "z" && e.shiftKey) { e.preventDefault(); redoRef.current(); }
+      else if (k === "y") { e.preventDefault(); redoRef.current(); }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -1317,11 +1232,10 @@ export default function ImageCanvasApp() {
     if (ae && typeof ae.blur === "function" && ae !== document.body) ae.blur();
   };
 
-  const { refW, refH } = getRefFrame();
-
   /* ======================= components ======================= */
   const Handles = ({ kind, r }) => {
     if (!selecting) return null;
+    const { refW, refH } = getRefFrame();
     const leftPx = Math.round(num(r.fx) * refW),
       topPx = Math.round(num(r.fy) * refH);
     const wPx = Math.round(num(r.fw) * refW),
@@ -1334,7 +1248,7 @@ export default function ImageCanvasApp() {
         key={pos}
         role="button"
         aria-label={`Resize ${pos}`}
-        style={{ ...styles.resizeHandle(color), ...st, cursor }}
+        style={{ ...styles.resizeHandle(color), ...st, cursor, pointerEvents: "auto" }}
         onPointerDown={(e) => onShapeHandlePointerDown(e, kind, r.id, pos)}
       />
     );
@@ -1344,15 +1258,16 @@ export default function ImageCanvasApp() {
         {mk("ne", { left: leftPx + wPx - 4, top: topPx - 4 }, "nesw-resize")}
         {mk("sw", { left: leftPx - 4, top: topPx + hPx - 4 }, "nesw-resize")}
         {mk("se", { left: leftPx + wPx - 4, top: topPx + hPx - 4 }, "nwse-resize")}
-        {mk("n", { left: cx - 4, top: topPx - 4 }, "ns-resize")}
-        {mk("s", { left: cx - 4, top: topPx + hPx - 4 }, "ns-resize")}
-        {mk("w", { left: leftPx - 4, top: cy - 4 }, "ew-resize")}
-        {mk("e", { left: leftPx + wPx - 4, top: cy - 4 }, "ew-resize")}
+        {mk("n",  { left: cx - 4, top: topPx - 4 }, "ns-resize")}
+        {mk("s",  { left: cx - 4, top: topPx + hPx - 4 }, "ns-resize")}
+        {mk("w",  { left: leftPx - 4, top: cy - 4 }, "ew-resize")}
+        {mk("e",  { left: leftPx + wPx - 4, top: cy - 4 }, "ew-resize")}
       </>
     );
   };
 
   const RectLayer = ({ kind }) => {
+    const { refW, refH } = getRefFrame();
     const list = getLayer(kind);
     const { fill, stroke } = COLORS[kind];
     const draftFill = fill.includes("0.35") ? fill.replace("0.35", "0.2") : fill;
@@ -1373,32 +1288,26 @@ export default function ImageCanvasApp() {
                   top: topPx,
                   width: wPx,
                   height: hPx,
+                  pointerEvents: "auto",
                 }}
                 onPointerDown={(e) => onShapeBodyPointerDown(e, kind, r.id)}
                 onDoubleClick={(e) => {
-                  if (kind === "window") {
+                  if (isWindow) {
                     e.stopPropagation();
                     openWindowPrompt(r.id, r.heightCm);
                   }
                 }}
                 aria-label={kind}
               />
-              {/* Height label for windows (click to edit) */}
               {isWindow && typeof r.heightCm === "number" && (
                 <div
-                  style={{ ...styles.windowTag, left: leftPx, top: topPx }}
+                  style={{ ...styles.windowTag, left: leftPx, top: topPx, pointerEvents: "auto" }}
                   role="button"
                   tabIndex={0}
                   aria-label={`Window height ${r.heightCm} centimeters. Click to edit.`}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    openWindowPrompt(r.id, r.heightCm);
-                  }}
+                  onClick={(e) => { e.stopPropagation(); openWindowPrompt(r.id, r.heightCm); }}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      openWindowPrompt(r.id, r.heightCm);
-                    }
+                    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openWindowPrompt(r.id, r.heightCm); }
                   }}
                 >
                   {`${r.heightCm} cm`}
@@ -1408,110 +1317,100 @@ export default function ImageCanvasApp() {
             </React.Fragment>
           );
         })}
-        {activeTool === kind &&
-          selecting &&
-          draft &&
-          (() => {
-            // Use UNCLAMPED draft so preview can go outside the image
-            const rr = normRectLoose(
-              draft.start.fx,
-              draft.start.fy,
-              draft.end.fx,
-              draft.end.fy
-            );
-            const l = Math.round(num(rr.fx) * refW),
-              t = Math.round(num(rr.fy) * refH);
-            const w = Math.round(num(rr.fw) * refW),
-              h = Math.round(num(rr.fh) * refH);
-            return (
-              <div
-                style={{
-                  ...styles.draft(draftFill, stroke),
-                  left: l,
-                  top: t,
-                  width: w,
-                  height: h,
-                }}
-              />
-            );
-          })()}
+        {activeTool === kind && selecting && draft && (() => {
+          const rr = normRectLoose(draft.start.fx, draft.start.fy, draft.end.fx, draft.end.fy);
+          const l = Math.round(num(rr.fx) * refW),
+            t = Math.round(num(rr.fy) * refH);
+          const w = Math.round(num(rr.fw) * refW),
+            h = Math.round(num(rr.fh) * refH);
+          return (
+            <div
+              style={{
+                ...styles.draft(draftFill, stroke),
+                left: l,
+                top: t,
+                width: w,
+                height: h,
+                pointerEvents: "none",
+              }}
+            />
+          );
+        })()}
       </>
     );
   };
 
-  const Items = () => (
-    <>
-      {items.map((it) => {
-        const left = Math.round(num(it.fx) * refW),
-          top = Math.round(num(it.fy) * refH);
-        const sizePx = Math.max(16, Math.min(256, num(it.size || 48)));
-        const scale = sizePx / 48;
-        return (
-          <React.Fragment key={it.id}>
-            <div
-              id={it.id}
-              style={{
-                ...styles.placed,
-                left,
-                top,
-                transform: `scale(${scale})`,
-                transformOrigin: "top left",
-              }}
-              onPointerDown={(e) => {
-                e.stopPropagation();
-                onItemPointerDown(e, it.id);
-              }}
-              onClickCapture={(e) => e.stopPropagation()}
-              onDragStart={(e) => e.preventDefault()}
-              onDoubleClick={() => removeItem(it.id)}
-              title={`${it.type}`}
-              role="img"
-              aria-label={it.type}
-              tabIndex={-1}
-            >
-              {Icon[it.type]?.(48)}
-            </div>
-            <div
-              role="button"
-              aria-label="Resize"
-              style={{
-                position: "absolute",
-                left: left + sizePx - 6,
-                top: top + sizePx - 6,
-                zIndex: 11,
-                width: 16,
-                height: 16,
-                borderRadius: 8,
-                background: "#fff",
-                border: "1px solid rgba(0,0,0,0.3)",
-                boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
-                display: "grid",
-                placeItems: "center",
-                cursor: "nwse-resize",
-                touchAction: "none",
-              }}
-              onPointerDown={(e) => {
-                e.stopPropagation();
-                onItemResizePointerDown(e, it.id);
-              }}
-              onClickCapture={(e) => e.stopPropagation()}
-            >
-              <span
+  const Items = () => {
+    const { refW, refH } = getRefFrame();
+    return (
+      <>
+        {items.map((it) => {
+          const left = Math.round(num(it.fx) * refW),
+            top = Math.round(num(it.fy) * refH);
+          const sizePx = Math.max(16, Math.min(256, num(it.size || 48)));
+          const scale = sizePx / 48;
+          return (
+            <React.Fragment key={it.id}>
+              <div
+                id={it.id}
                 style={{
-                  fontSize: 10,
-                  lineHeight: 1,
-                  userSelect: "none",
-                  pointerEvents: "none",
+                  ...styles.placed,
+                  left,
+                  top,
+                  transform: `scale(${scale})`,
+                  transformOrigin: "top left",
+                  pointerEvents: "auto",
                 }}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  onItemPointerDown(e, it.id);
+                }}
+                onClickCapture={(e) => e.stopPropagation()}
+                onDragStart={(e) => e.preventDefault()}
+                onDoubleClick={() => removeItem(it.id)}
+                title={`${it.type}`}
+                role="img"
+                aria-label={it.type}
+                tabIndex={-1}
               >
-                ↘︎
-              </span>
-            </div>
-          </React.Fragment>
-        );
-      })}
-    </>
-  );
+                {Icon[it.type]?.(48)}
+              </div>
+              <div
+                role="button"
+                aria-label="Resize"
+                style={{
+                  position: "absolute",
+                  left: left + sizePx - 6,
+                  top: top + sizePx - 6,
+                  zIndex: 11,
+                  width: 16,
+                  height: 16,
+                  borderRadius: 8,
+                  background: "#fff",
+                  border: "1px solid rgba(0,0,0,0.3)",
+                  boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+                  display: "grid",
+                  placeItems: "center",
+                  cursor: "nwse-resize",
+                  touchAction: "none",
+                  pointerEvents: "auto",
+                }}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  onItemResizePointerDown(e, it.id);
+                }}
+                onClickCapture={(e) => e.stopPropagation()}
+              >
+                <span style={{ fontSize: 10, lineHeight: 1, userSelect: "none", pointerEvents: "none" }}>
+                  ↘︎
+                </span>
+              </div>
+            </React.Fragment>
+          );
+        })}
+      </>
+    );
+  };
 
   const ActiveLabel = activeTool
     ? activeTool === "wall"
@@ -1521,144 +1420,47 @@ export default function ImageCanvasApp() {
       : "Floor"
     : "None";
 
-  const ImgWithSafeDims = () => {
-    const { dispW, dispH } = getDisplayDims();
-    const w = Math.max(1, dispW),
-      h = Math.max(1, dispH);
-    return (
-      <img
-        src={bgUrl}
-        alt="Background"
-        draggable={false}
-        onDragOver={onCanvasDragOver}
-        onDragEnter={onCanvasDragOver}
-        onDrop={onCanvasDrop}
-        style={{
-          width: w,
-          height: h,
-          objectFit: "contain",
-          background: "#fff",
-          borderRadius: 12,
-        }}
-      />
-    );
-  };
-
   return (
-    <div style={styles.app} tabIndex={-1} onMouseDown={defocusActive}>
+    <div style={styles.app} tabIndex={-1} onMouseDown={() => {
+      const ae = document.activeElement;
+      if (ae && typeof ae.blur === "function" && ae !== document.body) ae.blur();
+    }}>
       {/* toolbar */}
       <div style={styles.floaterBar}>
-        <button
-          aria-label="Save as image"
-          style={styles.floaterBtn}
-          title="Save as image"
-          onClick={saveCompositionImage}
-        >
-          ⬇️
-        </button>
-        <button
-          aria-label="Zoom out"
-          style={styles.floaterBtn}
-          title="Zoom out"
-          onClick={() => nudgeZoom(1 / 1.1)}
-        >
-          −
-        </button>
-        <button
-          aria-label="Zoom in"
-          style={styles.floaterBtn}
-          title="Zoom in"
-          onClick={() => nudgeZoom(1.1)}
-        >
-          ＋
-        </button>
-        <button
-          aria-label="Clear items/walls"
-          style={styles.floaterBtn}
-          title="Clear items & walls"
-          onClick={clearAll}
-        >
-          🧹
-        </button>
-        <button
-          aria-label="Remove background"
-          style={styles.floaterBtn}
-          title="Remove background"
-          onClick={clearBackground}
-        >
-          🗑️
-        </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          onChange={onInputChange}
-          hidden
-        />
+        <button aria-label="Save as image" style={styles.floaterBtn} title="Save as image" onClick={saveCompositionImage}>⬇️</button>
+        <button aria-label="Zoom out" style={styles.floaterBtn} title="Zoom out" onClick={() => nudgeZoom(1/1.1)}>−</button>
+        <button aria-label="Zoom in" style={styles.floaterBtn} title="Zoom in" onClick={() => nudgeZoom(1.1)}>＋</button>
+        <button aria-label="Clear items/walls" style={styles.floaterBtn} title="Clear items & walls" onClick={clearAll}>🧹</button>
+        <button aria-label="Remove background" style={styles.floaterBtn} title="Remove background" onClick={clearBackground}>🗑️</button>
+        <input ref={fileInputRef} type="file" accept="image/*" onChange={onInputChange} hidden />
       </div>
 
       {/* right-center controls */}
       <div style={styles.stack}>
         <div style={styles.selectBtn(selectOpen)}>
-          <div
-            style={styles.header(selectOpen)}
-            onClick={toggleSelect}
-            role="button"
-            aria-label="Select tool"
-          >
+          <div style={styles.header(selectOpen)} onClick={toggleSelect} role="button" aria-label="Select tool">
             {`Select${selecting && activeTool ? ` • ${ActiveLabel}` : ""}`}
           </div>
           {selectOpen && (
             <div style={styles.menu}>
-              <div
-                style={styles.item(activeTool === "wall", "#ff4da6")}
-                onClick={() => chooseTool("wall")}
-              >
-                Walls
-              </div>
-              <div
-                style={styles.item(activeTool === "window", "#00a050")}
-                onClick={() => chooseTool("window")}
-              >
-                Windows
-              </div>
-              <div
-                style={styles.item(activeTool === "floor", "#0a28a0")}
-                onClick={() => chooseTool("floor")}
-              >
-                Floor
-              </div>
+              <div style={styles.item(activeTool === "wall", "#ff4da6")} onClick={() => chooseTool("wall")}>Walls</div>
+              <div style={styles.item(activeTool === "window", "#00a050")} onClick={() => chooseTool("window")}>Windows</div>
+              <div style={styles.item(activeTool === "floor", "#0a28a0")} onClick={() => chooseTool("floor")}>Floor</div>
             </div>
           )}
         </div>
-        <button
-          style={styles.stopBtn}
-          onClick={stopSelecting}
-          aria-label="Stop selecting"
-        >
-          Stop selecting
-        </button>
+        <button style={styles.stopBtn} onClick={stopSelecting} aria-label="Stop selecting">Stop selecting</button>
       </div>
 
       {/* palette handle */}
-      <button
-        aria-label="Toggle palette"
-        onClick={() => setSidebarOpen((v) => !v)}
-        style={styles.toggleHandle}
-      >
+      <button aria-label="Toggle palette" onClick={() => setSidebarOpen((v) => !v)} style={styles.toggleHandle}>
         {sidebarOpen ? "‹" : "›"}
       </button>
 
       {/* palette */}
       <aside style={styles.sidebar(sidebarOpen)} aria-hidden={!sidebarOpen}>
         {PALETTE.map((p) => (
-          <div
-            key={p.type}
-            draggable
-            onDragStart={(e) => onPaletteDragStart(e, p.type)}
-            style={styles.paletteCard}
-            title={`Drag ${p.label}`}
-          >
+          <div key={p.type} draggable onDragStart={(e) => onPaletteDragStart(e, p.type)} style={styles.paletteCard} title={`Drag ${p.label}`}>
             {Icon[p.type]?.(48)}
             <div style={{ fontSize: 14 }}>{p.label}</div>
           </div>
@@ -1668,13 +1470,7 @@ export default function ImageCanvasApp() {
       {/* canvas */}
       <div
         ref={canvasRef}
-        style={{
-          position: "relative",
-          width: "100%",
-          height: "100%",
-          display: "grid",
-          placeItems: "center",
-        }}
+        style={{ position: "relative", width: "100%", height: "100%", overflow: "hidden" }}
         onDragEnter={onCanvasDragOver}
         onDragOver={onCanvasDragOver}
         onDrop={onCanvasDrop}
@@ -1686,37 +1482,57 @@ export default function ImageCanvasApp() {
         onWheel={onCanvasWheel}
       >
         {bgUrl ? (
-          <ImgWithSafeDims />
+          (() => {
+            const { bgDx, bgDy, baseW, baseH, scale } = getRefFrame();
+            return (
+              <div
+                style={{
+                  position: "absolute",
+                  left: bgDx,
+                  top: bgDy,
+                  width: baseW,
+                  height: baseH,
+                  transform: `scale(${scale})`,
+                  transformOrigin: "top left",
+                  pointerEvents: "none", // children re-enable where needed
+                }}
+              >
+                <img
+                  src={bgUrl}
+                  alt="Background"
+                  draggable={false}
+                  style={{
+                    position: "absolute",
+                    left: 0,
+                    top: 0,
+                    width: baseW,
+                    height: baseH,
+                    background: "#fff",
+                  }}
+                />
+                {/* layers order: floor → wall → window → items */}
+                <RectLayer kind="floor" />
+                <RectLayer kind="wall" />
+                <RectLayer kind="window" />
+                <Items />
+              </div>
+            );
+          })()
         ) : (
-          <div style={{ textAlign: "center", color: "#666" }}>
-            <div style={{ fontSize: 18, marginBottom: 6 }}>
-              Drop an image anywhere
+          <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "#666" }}>
+            <div style={{ textAlign: "center" }}>
+              <div style={{ fontSize: 18, marginBottom: 6 }}>Drop an image anywhere</div>
+              <div style={{ fontSize: 13, marginBottom: 12, opacity: 0.8 }}>or</div>
+              <button onClick={() => fileInputRef.current?.click()} style={styles.topChooseBtn}>Choose a file</button>
             </div>
-            <div style={{ fontSize: 13, marginBottom: 12, opacity: 0.8 }}>
-              or
-            </div>
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              style={styles.topChooseBtn}
-            >
-              Choose a file
-            </button>
           </div>
         )}
-
-        {/* layers order: floor → wall → window → items */}
-        <RectLayer kind="floor" />
-        <RectLayer kind="wall" />
-        <RectLayer kind="window" />
-        <Items />
       </div>
 
       {/* window height prompt */}
       {windowPrompt && (
         <form style={styles.note} onSubmit={submitWindowHeight}>
-          <div style={{ fontWeight: 700, marginBottom: 6 }}>
-            Window height above ground
-          </div>
+          <div style={{ fontWeight: 700, marginBottom: 6 }}>Window height above ground</div>
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <input
               autoFocus
@@ -1730,9 +1546,7 @@ export default function ImageCanvasApp() {
                 height: 30,
                 padding: "0 10px",
                 borderRadius: 8,
-                border: `1px solid ${
-                  windowPrompt.error ? "#d33" : "rgba(0,0,0,0.2)"
-                }`,
+                border: `1px solid ${windowPrompt.error ? "#d33" : "rgba(0,0,0,0.2)"}`,
                 outline: "none",
               }}
             />
@@ -1753,15 +1567,12 @@ export default function ImageCanvasApp() {
             </button>
           </div>
           {windowPrompt.error && (
-            <div style={{ marginTop: 6, color: "#d33", fontSize: 12 }}>
-              {windowPrompt.error}
-            </div>
+            <div style={{ marginTop: 6, color: "#d33", fontSize: 12 }}>{windowPrompt.error}</div>
           )}
-          <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>
-            Tip: you can enter decimals (e.g., 37.5)
-          </div>
+          <div style={{ marginTop: 6, fontSize: 12, opacity: 0.8 }}>Tip: you can enter decimals (e.g., 37.5)</div>
         </form>
       )}
     </div>
   );
 }
+
