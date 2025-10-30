@@ -1173,49 +1173,119 @@ async function saveCompositionImage() {
   try {
     if (!canvasRef.current || !bgUrl) return;
 
-    // Get current frames
     const { bgDx, bgDy, dispW, dispH, cw, ch, refW, refH } = getRefFrame();
     const natW = num(bgSize.naturalW);
     const natH = num(bgSize.naturalH);
     if (!(dispW > 0 && dispH > 0 && natW > 0 && natH > 0)) {
-      alert("No visible background to export.");
+      alert("No background to export.");
       return;
     }
 
-    // Intersection of displayed bg rect (bgDx,bgDy,dispW,dispH) with viewport (0,0,cw,ch)
+    const isSquare = Math.abs(natW - natH) <= 0.5;
+
+    // --- CASE A: square background -> export the FULL displayed background area (dispW × dispH)
+    if (isSquare) {
+      const outW = Math.max(1, Math.round(dispW));
+      const outH = Math.max(1, Math.round(dispH));
+      const dpr = Math.max(1, Math.floor(num(window.devicePixelRatio, 1)));
+
+      const canvas = document.createElement("canvas");
+      canvas.width = outW * dpr;
+      canvas.height = outH * dpr;
+      canvas.style.width = `${outW}px`;
+      canvas.style.height = `${outH}px`;
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      ctx.scale(dpr, dpr);
+
+      // Draw the background scaled to exactly dispW × dispH (the on-screen size for a square)
+      await new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          ctx.drawImage(img, 0, 0, outW, outH);
+          resolve();
+        };
+        img.onerror = resolve;
+        img.src = bgUrl;
+      });
+
+      // Draw overlays relative to the background origin: subtract bgDx/bgDy
+      const drawRects = (list, color) => {
+        if (!list?.length) return;
+        ctx.save();
+        ctx.globalAlpha = 0.35;
+        ctx.fillStyle = color;
+        ctx.strokeStyle = color;
+        for (const r of list) {
+          const leftPx = num(r.fx) * refW - num(bgDx);
+          const topPx  = num(r.fy) * refH - num(bgDy);
+          const wPx    = num(r.fw) * refW;
+          const hPx    = num(r.fh) * refH;
+          ctx.fillRect(leftPx, topPx, wPx, hPx);
+          ctx.strokeRect(leftPx, topPx, wPx, hPx);
+        }
+        ctx.restore();
+      };
+      drawRects(floors,  "#0a28a0");
+      drawRects(walls,   "#ff4da6");
+      drawRects(windows, "#00a050");
+
+      for (const it of items) {
+        const node = document.getElementById(it.id);
+        if (!node) continue;
+        const svg = node.querySelector("svg");
+        if (!svg) continue;
+
+        const left   = num(it.fx) * refW - num(bgDx);
+        const top    = num(it.fy) * refH - num(bgDy);
+        const sizePx = Math.max(16, Math.min(256, num(it.size || 48)));
+
+        const cloneSvg = svg.cloneNode(true);
+        const svgStr = new XMLSerializer().serializeToString(cloneSvg);
+        const blob = new Blob([svgStr], { type: "image/svg+xml;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+
+        await new Promise((resolve) => {
+          const img = new Image();
+          img.onload = () => {
+            ctx.drawImage(img, left, top, sizePx, sizePx);
+            URL.revokeObjectURL(url);
+            resolve();
+          };
+          img.onerror = () => {
+            URL.revokeObjectURL(url);
+            resolve();
+          };
+          img.src = url;
+        });
+      }
+
+      const a = document.createElement("a");
+      a.href = canvas.toDataURL("image/png");
+      a.download = "background-full-square.png";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      return;
+    }
+
+    // --- CASE B: non-square -> export EXACTLY what’s visible (screenshot of visible bg)
     const interLeft   = Math.max(0, Math.min(cw, bgDx));
     const interTop    = Math.max(0, Math.min(ch, bgDy));
     const interRight  = Math.max(0, Math.min(cw, bgDx + dispW));
     const interBottom = Math.max(0, Math.min(ch, bgDy + dispH));
-    const interW = Math.max(0, interRight - interLeft);
-    const interH = Math.max(0, interBottom - interTop);
+    const interW = interRight - interLeft;
+    const interH = interBottom - interTop;
+
     if (!(interW > 0 && interH > 0)) {
       alert("No visible background to export.");
       return;
     }
 
-    // Map the visible rect to natural-image pixel coords (precise float math)
-    const scaleX = natW / dispW;
-    const scaleY = natH / dispH;
-
-    const visX = Math.max(0, interLeft - bgDx);   // px inside the displayed bg rect
-    const visY = Math.max(0, interTop  - bgDy);
-
-    let srcX = visX * scaleX;
-    let srcY = visY * scaleY;
-    let srcW = interW * scaleX;
-    let srcH = interH * scaleY;
-
-    // Clamp source crop to the natural image bounds to avoid overflow
-    if (srcX < 0) { srcW += srcX; srcX = 0; }
-    if (srcY < 0) { srcH += srcY; srcY = 0; }
-    if (srcX + srcW > natW) srcW = Math.max(0, natW - srcX);
-    if (srcY + srcH > natH) srcH = Math.max(0, natH - srcY);
-
-    // Prepare output canvas sized EXACTLY to the visible bg area on screen
+    const dpr = Math.max(1, Math.floor(num(window.devicePixelRatio, 1)));
     const outW = Math.max(1, Math.round(interW));
     const outH = Math.max(1, Math.round(interH));
-    const dpr = Math.max(1, Math.floor(num(window.devicePixelRatio, 1)));
 
     const canvas = document.createElement("canvas");
     canvas.width = outW * dpr;
@@ -1227,11 +1297,25 @@ async function saveCompositionImage() {
     if (!ctx) return;
     ctx.scale(dpr, dpr);
 
-    // Draw cropped background
+    // Crop proper portion of natural image to match visible area
+    const scaleX = natW / dispW;
+    const scaleY = natH / dispH;
+    const visX = Math.max(0, interLeft - bgDx);
+    const visY = Math.max(0, interTop  - bgDy);
+    let srcX = visX * scaleX;
+    let srcY = visY * scaleY;
+    let srcW = interW * scaleX;
+    let srcH = interH * scaleY;
+
+    // Clamp to natural bounds
+    if (srcX < 0) { srcW += srcX; srcX = 0; }
+    if (srcY < 0) { srcH += srcY; srcY = 0; }
+    if (srcX + srcW > natW) srcW = Math.max(0, natW - srcX);
+    if (srcY + srcH > natH) srcH = Math.max(0, natH - srcY);
+
     await new Promise((resolve) => {
       const img = new Image();
       img.onload = () => {
-        // draw cropped natural image region scaled to the visible bg size
         ctx.drawImage(img, srcX, srcY, srcW, srcH, 0, 0, interW, interH);
         resolve();
       };
@@ -1239,8 +1323,6 @@ async function saveCompositionImage() {
       img.src = bgUrl;
     });
 
-    // Helper to draw rectangles; positions are viewport-based: (fx*refW, fy*refH)
-    // We offset by interLeft/interTop so (0,0) is the exported bg region's origin.
     const drawRects = (list, color) => {
       if (!list?.length) return;
       ctx.save();
@@ -1257,21 +1339,18 @@ async function saveCompositionImage() {
       }
       ctx.restore();
     };
-
-    // Draw overlays in the same order as on screen
     drawRects(floors,  "#0a28a0");
     drawRects(walls,   "#ff4da6");
     drawRects(windows, "#00a050");
 
-    // Draw placed SVG items (same viewport basis, then offset to export origin)
     for (const it of items) {
       const node = document.getElementById(it.id);
       if (!node) continue;
       const svg = node.querySelector("svg");
       if (!svg) continue;
 
-      const left = num(it.fx) * refW - interLeft;
-      const top  = num(it.fy) * refH - interTop;
+      const left   = num(it.fx) * refW - interLeft;
+      const top    = num(it.fy) * refH - interTop;
       const sizePx = Math.max(16, Math.min(256, num(it.size || 48)));
 
       const cloneSvg = svg.cloneNode(true);
@@ -1294,7 +1373,6 @@ async function saveCompositionImage() {
       });
     }
 
-    // Download PNG — an exact "screenshot" of the visible background area (with overlays)
     const a = document.createElement("a");
     a.href = canvas.toDataURL("image/png");
     a.download = "background-screenshot.png";
