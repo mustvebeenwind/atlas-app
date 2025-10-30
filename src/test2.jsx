@@ -405,7 +405,7 @@ const styles = {
     position: "absolute",
     background: b,
     border: `2px solid ${s}`,
-    borderRadius: 4,
+    borderRadius: 0,
     pointerEvents: "auto",
     cursor: "move",
   }),
@@ -1170,108 +1170,112 @@ export default function ImageCanvasApp() {
     snapshotState(items, null, reset, walls, windows, floors);
   };
 
-  async function saveCompositionImage() {
-    try {
-      if (!canvasRef.current) return;
-      const { bgDx, bgDy, dispW, dispH } = getRefFrame();
-      const exportOnlyBgArea = Boolean(bgUrl && dispW > 0 && dispH > 0);
-      const outW = exportOnlyBgArea
-        ? Math.max(1, round(dispW, 1))
-        : Math.max(1, Math.floor(canvasRef.current.getBoundingClientRect().width));
-      const outH = exportOnlyBgArea
-        ? Math.max(1, round(dispH, 1))
-        : Math.max(1, Math.floor(canvasRef.current.getBoundingClientRect().height));
-      const canvas = document.createElement("canvas");
-      const dpr = Math.max(1, Math.floor(num(window.devicePixelRatio, 1)));
-      canvas.width = outW * dpr;
-      canvas.height = outH * dpr;
-      canvas.style.width = `${outW}px`;
-      canvas.style.height = `${outH}px`;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      ctx.scale(dpr, dpr);
-      if (!exportOnlyBgArea) {
-        ctx.fillStyle = "#faf9f5";
-        ctx.fillRect(0, 0, outW, outH);
-      }
-      if (bgUrl && dispW > 0 && dispH > 0) {
-        await new Promise((resolve) => {
-          const img = new Image();
-          img.onload = () => {
-            const x = exportOnlyBgArea ? 0 : Math.round(num(bgDx));
-            const y = exportOnlyBgArea ? 0 : Math.round(num(bgDy));
-            ctx.drawImage(img, x, y, round(dispW, 1), round(dispH, 1));
-            resolve();
-          };
-          img.onerror = resolve;
-          img.src = bgUrl;
-        });
-      }
-      const { refW, refH } = getRefFrame();
-      const drawRects = (list, color) => {
-        ctx.save();
-        ctx.globalAlpha = 0.35;
-        ctx.fillStyle = color;
-        ctx.strokeStyle = color;
-        for (const r of list) {
-          const leftPx = round(num(r.fx) * refW),
-            topPx = round(num(r.fy) * refH);
-          const wPx = round(num(r.fw) * refW),
-            hPx = round(num(r.fh) * refH);
-          const drawX = exportOnlyBgArea ? leftPx - round(num(bgDx)) : leftPx;
-          const drawY = exportOnlyBgArea ? topPx - round(num(bgDy)) : topPx;
-          ctx.fillRect(drawX, drawY, wPx, hPx);
-          ctx.strokeRect(drawX, drawY, wPx, hPx);
-        }
-        ctx.restore();
-      };
-      drawRects(floors, "#0a28a0");
-      drawRects(walls, "#ff4da6");
-      drawRects(windows, "#00a050");
+async function saveCompositionImage() {
+  try {
+    if (!canvasRef.current) return;
 
-      // draw items (SVGs)
-      for (const it of items) {
-        const node = document.getElementById(it.id);
-        if (!node) continue;
-        const svg = node.querySelector("svg");
-        if (!svg) continue;
-        const left0 = round(num(it.fx) * refW),
-          top0 = round(num(it.fy) * refH);
-        const left = exportOnlyBgArea ? left0 - round(num(bgDx)) : left0;
-        const top = exportOnlyBgArea ? top0 - round(num(bgDy)) : top0;
-        const cloneSvg = svg.cloneNode(true);
-        const svgStr = new XMLSerializer().serializeToString(cloneSvg);
-        const blob = new Blob([svgStr], { type: "image/svg+xml;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        const sizePx = Math.max(16, Math.min(256, num(it.size || 48)));
-        await new Promise((resolve) => {
-          const img = new Image();
-          img.onload = () => {
-            ctx.drawImage(img, left, top, sizePx, sizePx);
-            URL.revokeObjectURL(url);
-            resolve();
-          };
-          img.onerror = () => {
-            URL.revokeObjectURL(url);
-            resolve();
-          };
-          img.src = url;
-        });
-      }
-      const a = document.createElement("a");
-      a.href = canvas.toDataURL("image/png");
-      a.download = exportOnlyBgArea
-        ? "composition-transparent.png"
-        : "composition.png";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-    } catch (err) {
-      console.error("saveCompositionImage failed", err);
-      alert("Could not save the composition image.");
+    // Use the full canvas container size (the on-screen viewport)
+    const { bgDx, bgDy, dispW, dispH, cw, ch } = getRefFrame();
+    const outW = Math.max(1, Math.floor(cw));
+    const outH = Math.max(1, Math.floor(ch));
+
+    const canvas = document.createElement("canvas");
+    const dpr = Math.max(1, Math.floor(num(window.devicePixelRatio, 1)));
+    canvas.width = outW * dpr;
+    canvas.height = outH * dpr;
+    canvas.style.width = `${outW}px`;
+    canvas.style.height = `${outH}px`;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.scale(dpr, dpr);
+
+    // Fill viewport background (matches app bg)
+    ctx.fillStyle = "#faf9f5";
+    ctx.fillRect(0, 0, outW, outH);
+
+    // Draw the background image exactly where it is on screen
+    if (bgUrl && dispW > 0 && dispH > 0) {
+      await new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          // bgDx/bgDy place the displayed image within the viewport
+          ctx.drawImage(img, Math.round(num(bgDx)), Math.round(num(bgDy)), round(dispW, 1), round(dispH, 1));
+          resolve();
+        };
+        img.onerror = resolve;
+        img.src = bgUrl;
+      });
     }
-  }
 
+    // Use the viewport as the reference frame for overlays (matches on-screen)
+    const refW = cw;
+    const refH = ch;
+
+    // Draw rectangle layers (floor → wall → window) like on screen
+    const drawRects = (list, color) => {
+      ctx.save();
+      ctx.globalAlpha = 0.35;
+      ctx.fillStyle = color;
+      ctx.strokeStyle = color;
+      for (const r of list) {
+        const leftPx = round(num(r.fx) * refW);
+        const topPx = round(num(r.fy) * refH);
+        const wPx = round(num(r.fw) * refW);
+        const hPx = round(num(r.fh) * refH);
+        ctx.fillRect(leftPx, topPx, wPx, hPx);
+        ctx.strokeRect(leftPx, topPx, wPx, hPx);
+      }
+      ctx.restore();
+    };
+    drawRects(floors, "#0a28a0");
+    drawRects(walls, "#ff4da6");
+    drawRects(windows, "#00a050");
+
+    // Draw placed SVG items (bed/door/table/chair) at on-screen positions
+    for (const it of items) {
+      const node = document.getElementById(it.id);
+      if (!node) continue;
+      const svg = node.querySelector("svg");
+      if (!svg) continue;
+
+      const left = round(num(it.fx) * refW);
+      const top = round(num(it.fy) * refH);
+      const sizePx = Math.max(16, Math.min(256, num(it.size || 48)));
+
+      const cloneSvg = svg.cloneNode(true);
+      const svgStr = new XMLSerializer().serializeToString(cloneSvg);
+      const blob = new Blob([svgStr], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+
+      await new Promise((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          ctx.drawImage(img, left, top, sizePx, sizePx);
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        img.onerror = () => {
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        img.src = url;
+      });
+    }
+
+    // Download
+    const a = document.createElement("a");
+    a.href = canvas.toDataURL("image/png");
+    a.download = "canvas-snapshot.png";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } catch (err) {
+    console.error("saveCompositionImage failed", err);
+    alert("Could not save the composition image.");
+  }
+}
+  
   // undo/redo
   const undo = () => {
     if (!canUndo) return;
@@ -1555,7 +1559,7 @@ export default function ImageCanvasApp() {
           height: h,
           objectFit: "contain",
           background: "#fff",
-          borderRadius: 12,
+          borderRadius: 0,
         }}
       />
     );
