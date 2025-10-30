@@ -1171,94 +1171,107 @@ export default function ImageCanvasApp() {
   };
 async function saveCompositionImage() {
   try {
-    if (!canvasRef.current) return;
+    if (!canvasRef.current || !bgUrl) return;
 
-    // Current frames (viewport + background placement/size)
+    // Get current frames
     const { bgDx, bgDy, dispW, dispH, cw, ch, refW, refH } = getRefFrame();
-
-    // Intersection of background rect with viewport (what’s actually visible)
-    const interLeft   = Math.max(0, Math.min(cw, bgDx));
-    const interTop    = Math.max(0, Math.min(ch, bgDy));
-    const interRight  = Math.max(0, Math.min(cw, bgDx + dispW));
-    const interBottom = Math.max(0, Math.min(ch, bgDy + dispH));
-    const interW = Math.max(0, Math.floor(interRight - interLeft));
-    const interH = Math.max(0, Math.floor(interBottom - interTop));
-
-    if (interW <= 0 || interH <= 0) {
+    const natW = num(bgSize.naturalW);
+    const natH = num(bgSize.naturalH);
+    if (!(dispW > 0 && dispH > 0 && natW > 0 && natH > 0)) {
       alert("No visible background to export.");
       return;
     }
 
-    // Output canvas sized to the visible background area only
-    const canvas = document.createElement("canvas");
+    // Intersection of displayed bg rect (bgDx,bgDy,dispW,dispH) with viewport (0,0,cw,ch)
+    const interLeft   = Math.max(0, Math.min(cw, bgDx));
+    const interTop    = Math.max(0, Math.min(ch, bgDy));
+    const interRight  = Math.max(0, Math.min(cw, bgDx + dispW));
+    const interBottom = Math.max(0, Math.min(ch, bgDy + dispH));
+    const interW = Math.max(0, interRight - interLeft);
+    const interH = Math.max(0, interBottom - interTop);
+    if (!(interW > 0 && interH > 0)) {
+      alert("No visible background to export.");
+      return;
+    }
+
+    // Map the visible rect to natural-image pixel coords (precise float math)
+    const scaleX = natW / dispW;
+    const scaleY = natH / dispH;
+
+    const visX = Math.max(0, interLeft - bgDx);   // px inside the displayed bg rect
+    const visY = Math.max(0, interTop  - bgDy);
+
+    let srcX = visX * scaleX;
+    let srcY = visY * scaleY;
+    let srcW = interW * scaleX;
+    let srcH = interH * scaleY;
+
+    // Clamp source crop to the natural image bounds to avoid overflow
+    if (srcX < 0) { srcW += srcX; srcX = 0; }
+    if (srcY < 0) { srcH += srcY; srcY = 0; }
+    if (srcX + srcW > natW) srcW = Math.max(0, natW - srcX);
+    if (srcY + srcH > natH) srcH = Math.max(0, natH - srcY);
+
+    // Prepare output canvas sized EXACTLY to the visible bg area on screen
+    const outW = Math.max(1, Math.round(interW));
+    const outH = Math.max(1, Math.round(interH));
     const dpr = Math.max(1, Math.floor(num(window.devicePixelRatio, 1)));
-    canvas.width = interW * dpr;
-    canvas.height = interH * dpr;
-    canvas.style.width = `${interW}px`;
-    canvas.style.height = `${interH}px`;
+
+    const canvas = document.createElement("canvas");
+    canvas.width = outW * dpr;
+    canvas.height = outH * dpr;
+    canvas.style.width = `${outW}px`;
+    canvas.style.height = `${outH}px`;
+
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.scale(dpr, dpr);
 
-    // 1) Draw the proper cropped portion of the background image
-    if (bgUrl && dispW > 0 && dispH > 0) {
-      await new Promise((resolve) => {
-        const img = new Image();
-        img.onload = () => {
-          // Map visible (on-screen) rect to source pixels (natural image space)
-          const scaleX = num(bgSize.naturalW) / Math.max(1, dispW);
-          const scaleY = num(bgSize.naturalH) / Math.max(1, dispH);
+    // Draw cropped background
+    await new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        // draw cropped natural image region scaled to the visible bg size
+        ctx.drawImage(img, srcX, srcY, srcW, srcH, 0, 0, interW, interH);
+        resolve();
+      };
+      img.onerror = resolve;
+      img.src = bgUrl;
+    });
 
-          // Visible offset inside the displayed background rect
-          const visX = Math.max(0, interLeft - bgDx);
-          const visY = Math.max(0, interTop - bgDy);
-
-          // Source crop (in natural image pixels)
-          const srcX = Math.max(0, visX * scaleX);
-          const srcY = Math.max(0, visY * scaleY);
-          const srcW = Math.max(1, interW * scaleX);
-          const srcH = Math.max(1, interH * scaleY);
-
-          // Draw cropped image to (0,0) with exactly interW × interH
-          ctx.drawImage(img, srcX, srcY, srcW, srcH, 0, 0, interW, interH);
-          resolve();
-        };
-        img.onerror = resolve;
-        img.src = bgUrl;
-      });
-    }
-
-    // Helper to draw rectangles (offset to the exported region’s origin)
+    // Helper to draw rectangles; positions are viewport-based: (fx*refW, fy*refH)
+    // We offset by interLeft/interTop so (0,0) is the exported bg region's origin.
     const drawRects = (list, color) => {
+      if (!list?.length) return;
       ctx.save();
       ctx.globalAlpha = 0.35;
       ctx.fillStyle = color;
       ctx.strokeStyle = color;
       for (const r of list) {
-        const leftPx = Math.round(num(r.fx) * refW) - Math.round(interLeft);
-        const topPx  = Math.round(num(r.fy) * refH) - Math.round(interTop);
-        const wPx    = Math.round(num(r.fw) * refW);
-        const hPx    = Math.round(num(r.fh) * refH);
+        const leftPx = num(r.fx) * refW - interLeft;
+        const topPx  = num(r.fy) * refH - interTop;
+        const wPx    = num(r.fw) * refW;
+        const hPx    = num(r.fh) * refH;
         ctx.fillRect(leftPx, topPx, wPx, hPx);
         ctx.strokeRect(leftPx, topPx, wPx, hPx);
       }
       ctx.restore();
     };
 
-    // 2) Overlay order: floor → wall → window
-    drawRects(floors, "#0a28a0");
-    drawRects(walls,  "#ff4da6");
-    drawRects(windows,"#00a050");
+    // Draw overlays in the same order as on screen
+    drawRects(floors,  "#0a28a0");
+    drawRects(walls,   "#ff4da6");
+    drawRects(windows, "#00a050");
 
-    // 3) Draw dragged SVG items, offset to exported region
+    // Draw placed SVG items (same viewport basis, then offset to export origin)
     for (const it of items) {
       const node = document.getElementById(it.id);
       if (!node) continue;
       const svg = node.querySelector("svg");
       if (!svg) continue;
 
-      const left = Math.round(num(it.fx) * refW) - Math.round(interLeft);
-      const top  = Math.round(num(it.fy) * refH) - Math.round(interTop);
+      const left = num(it.fx) * refW - interLeft;
+      const top  = num(it.fy) * refH - interTop;
       const sizePx = Math.max(16, Math.min(256, num(it.size || 48)));
 
       const cloneSvg = svg.cloneNode(true);
@@ -1281,7 +1294,7 @@ async function saveCompositionImage() {
       });
     }
 
-    // Download PNG: exactly the visible background area "screenshot"
+    // Download PNG — an exact "screenshot" of the visible background area (with overlays)
     const a = document.createElement("a");
     a.href = canvas.toDataURL("image/png");
     a.download = "background-screenshot.png";
@@ -1293,7 +1306,7 @@ async function saveCompositionImage() {
     alert("Could not save the composition image.");
   }
 }
-  
+
   // undo/redo
   const undo = () => {
     if (!canUndo) return;
