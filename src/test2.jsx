@@ -386,6 +386,7 @@ export default function ImageCanvasApp() {
   const wheelTimerRef = useRef(null);
   const panDragRef = useRef({ active: false, startX: 0, startY: 0, origX: 0, origY: 0 });
   const pointersRef = useRef(new Map());
+  const overlayRef = useRef(null); // NEW: exact overlay box for pointer math
 
   /* shape refs */
   const shapeDraggingRef = useRef({ kind: null, id: null, offsetFx: 0, offsetFy: 0, fw: 0, fh: 0, start: null });
@@ -487,19 +488,34 @@ export default function ImageCanvasApp() {
       dispH: f.dispH,
     };
   };
-  // IMPORTANT: map to overlay coordinates (scaled by overlayScale)
+
+  // NEW: compute relative coords using overlay bounding box if present
   const getRel = (x, y) => {
-    const { left, top, bgDx, bgDy, dispW, dispH, refW, refH } = getRefFrame();
+    const F = getRefFrame();
+    const host = overlayRef.current;
+    if (host) {
+      const r = host.getBoundingClientRect();
+      return {
+        fx: clamp01((x - r.left) / Math.max(1, r.width)),
+        fy: clamp01((y - r.top) / Math.max(1, r.height)),
+        refW: F.refW,
+        refH: F.refH,
+        bgDx: F.bgDx,
+        bgDy: F.bgDy,
+        dispW: F.dispW,
+        dispH: F.dispH,
+      };
+    }
     const ov = Math.max(0.0001, num(bgSize.overlayScale, 1));
     return {
-      fx: clamp01((x - (left + bgDx)) / Math.max(1, dispW * ov)),
-      fy: clamp01((y - (top + bgDy)) / Math.max(1, dispH * ov)),
-      refW,
-      refH,
-      bgDx,
-      bgDy,
-      dispW,
-      dispH,
+      fx: clamp01((x - (F.left + F.bgDx)) / Math.max(1, F.dispW * ov)),
+      fy: clamp01((y - (F.top + F.bgDy)) / Math.max(1, F.dispH * ov)),
+      refW: F.refW,
+      refH: F.refH,
+      bgDx: F.bgDx,
+      bgDy: F.bgDy,
+      dispW: F.dispW,
+      dispH: F.dispH,
     };
   };
 
@@ -791,30 +807,28 @@ export default function ImageCanvasApp() {
       const idx = floorFigures.findIndex((f) => f.id === fr.id);
       if (idx !== -1) {
         const { dispW, dispH } = getRefFrame();
-        // because overlay is scaled, getRel uses overlayScale; here we work in normalized space, so dx/dy map to dispW/dispH
         const dx = (e.clientX - fr.startX) / Math.max(1, dispW * num(bgSize.overlayScale, 1));
         const dy = (e.clientY - fr.startY) / Math.max(1, dispH * num(bgSize.overlayScale, 1));
         const s = fr.startBBox;
         let L = s.L, T = s.T, R = s.R, B = s.B;
-        const minSize = 0.01;
-        const move = {
-          nw: () => { L = clamp01(s.L + dx); T = clamp01(s.T + dy); },
-          ne: () => { R = clamp01(s.R + dx); T = clamp01(s.T + dy); },
-          sw: () => { L = clamp01(s.L + dx); B = clamp01(s.B + dy); },
-          se: () => { R = clamp01(s.R + dx); B = clamp01(s.B + dy); },
-          n:  () => { T = clamp01(s.T + dy); },
-          s:  () => { B = clamp01(s.B + dy); },
-          w:  () => { L = clamp01(s.L + dx); },
-          e:  () => { R = clamp01(s.R + dx); },
-        }[fr.handle] || (() => {});
-        move();
+        const ce = (v) => clamp01(v);
+        ({
+          nw: () => { L = ce(s.L + dx); T = ce(s.T + dy); },
+          ne: () => { R = ce(s.R + dx); T = ce(s.T + dy); },
+          sw: () => { L = ce(s.L + dx); B = ce(s.B + dy); },
+          se: () => { R = ce(s.R + dx); B = ce(s.B + dy); },
+          n:  () => { T = ce(s.T + dy); },
+          s:  () => { B = ce(s.B + dy); },
+          w:  () => { L = ce(s.L + dx); },
+          e:  () => { R = ce(s.R + dx); },
+        }[fr.handle] || (() => {}))();
 
-        // bounds
+        // bounds and uniform with Shift
         L = Math.max(0, Math.min(L, 1)); R = Math.max(0, Math.min(R, 1));
         T = Math.max(0, Math.min(T, 1)); B = Math.max(0, Math.min(B, 1));
 
-        // Uniform scaling with Shift
         if (e.shiftKey) {
+          const minSize = 0.01;
           const startW = Math.max(minSize, s.R - s.L);
           const startH = Math.max(minSize, s.B - s.T);
           const ratio = startW / startH;
@@ -849,6 +863,7 @@ export default function ImageCanvasApp() {
           T = Math.max(0, Math.min(T, 1)); B = Math.max(0, Math.min(B, 1));
         }
 
+        const minSize = 0.01;
         if (R - L < minSize) { if (fr.handle.includes("w")) L = R - minSize; else R = L + minSize; }
         if (B - T < minSize) { if (fr.handle.includes("n")) T = B - minSize; else B = T + minSize; }
 
@@ -1047,6 +1062,20 @@ export default function ImageCanvasApp() {
     }
   };
 
+  /* Global pointer listeners so drags never miss even if pointer capture shifts */
+  useEffect(() => {
+    const move = (e) => onCanvasPointerMove(e);
+    const up = (e) => onCanvasPointerUp(e);
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   /* zoom */
   const scheduleBgSnapshot = (nextBgSize) => {
     if (wheelTimerRef.current) clearTimeout(wheelTimerRef.current);
@@ -1166,15 +1195,34 @@ export default function ImageCanvasApp() {
 
       // items
       for (const it of items) {
-        const node = document.getElementById(it.id);
-        if (!node) continue;
-        const svg = node.querySelector("svg");
-        if (!svg) continue;
         const left0 = round(F.bgDx + num(it.fx) * F.dispW * ov);
         const top0 = round(F.bgDy + num(it.fy) * F.dispH * ov);
         const left = exportOnlyBgArea ? left0 - round(num(F.bgDx)) : left0;
         const top = exportOnlyBgArea ? top0 - round(num(F.bgDy)) : top0;
-        const cloneSvg = svg.cloneNode(true);
+
+        // render item's SVG
+        const svg = Icon[it.type]?.(48);
+        // build a standalone SVG string
+        const wrapper = document.createElement("div");
+        wrapper.appendChild(
+          (() => {
+            const node = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+            node.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+            node.setAttribute("viewBox", "0 0 64 64");
+            node.innerHTML = (svg?.props?.children || []).map((c, i) => {
+              const outer = document.createElement("div");
+              outer.appendChild(document.createElement("template").content);
+              return "";
+            });
+            return node;
+          })()
+        ); // No-op: simplified; export via existing DOM below.
+
+        const node = document.getElementById(it.id);
+        if (!node) continue;
+        const svgNode = node.querySelector("svg");
+        if (!svgNode) continue;
+        const cloneSvg = svgNode.cloneNode(true);
         const svgStr = new XMLSerializer().serializeToString(cloneSvg);
         const blob = new Blob([svgStr], { type: "image/svg+xml;charset=utf-8" });
         const url = URL.createObjectURL(blob);
@@ -1506,7 +1554,6 @@ export default function ImageCanvasApp() {
         const F = getRefFrame();
         const left = Math.round(num(it.fx) * F.dispW), top = Math.round(num(it.fy) * F.dispH);
         const baseSize = Math.max(16, Math.min(256, num(it.size || 48)));
-        // DOM overlay wrapper scales everything by overlayScale; keep item scale independent here
         const sizePx = Math.round(baseSize);
         const scale = sizePx / 48;
         return (
@@ -1574,10 +1621,7 @@ export default function ImageCanvasApp() {
   };
 
   return (
-    <div style={styles.app} tabIndex={-1} onMouseDown={() => {
-      const ae = document.activeElement;
-      if (ae && typeof ae.blur === "function" && ae !== document.body) ae.blur();
-    }}>
+    <div style={styles.app} tabIndex={-1} onMouseDown={defocusActive}>
       {/* toolbar */}
       <div style={styles.floaterBar}>
         <button aria-label="Save as image" style={styles.floaterBtn} title="Save as image" onClick={saveCompositionImage}>⬇️</button>
@@ -1641,12 +1685,13 @@ export default function ImageCanvasApp() {
           </div>
         )}
 
-        {/* Overlays wrapper: positioned on top-left of image and scaled by overlayScale */}
+        {/* Overlays wrapper: positioned on image and scaled by overlayScale */}
         {(() => {
           const { bgDx, bgDy, dispW, dispH } = getRefFrame();
           const ov = Math.max(0.0001, num(bgSize.overlayScale, 1));
           return (
             <div
+              ref={overlayRef}
               style={{
                 position: "absolute",
                 left: bgDx,
