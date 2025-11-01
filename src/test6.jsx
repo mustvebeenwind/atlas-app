@@ -603,13 +603,26 @@ export default function ImageCanvasApp() {
       </div>
 
       {/* palette handle */}
-      <button aria-label="Toggle palette" onClick={() => setSidebarOpen(v=>!v)} style={styles.toggleHandle}>{/* ‹ / › */}{/* keep same look */}{/* Using arrows */}{/* eslint-disable-next-line */}{'›'}</button>
-
+      <button
+        aria-label="Toggle palette"
+        onClick={() => setSidebarOpen((v) => !v)}
+        style={styles.toggleHandle}
+      >
+        {sidebarOpen ? "‹" : "›"}
+      </button>
+      
       {/* palette */}
-      <aside style={styles.sidebar(false)} aria-hidden={!false /* keep visible toggle external if you want */}>
-        {PALETTE.map(p => (
-          <div key={p.type} draggable onDragStart={(e)=>onPaletteDragStart(e,p.type)} style={styles.paletteCard} title={`Drag ${p.label}`}>
-            {Icon[p.type]?.(48)} <div style={{fontSize:14}}>{p.label}</div>
+      <aside style={styles.sidebar(sidebarOpen)} aria-hidden={!sidebarOpen}>
+        {PALETTE.map((p) => (
+          <div
+            key={p.type}
+            draggable
+            onDragStart={(e) => onPaletteDragStart(e, p.type)}
+            style={styles.paletteCard}
+            title={`Drag ${p.label}`}
+          >
+            {Icon[p.type]?.(48)}
+            <div style={{ fontSize: 14 }}>{p.label}</div>
           </div>
         ))}
       </aside>
