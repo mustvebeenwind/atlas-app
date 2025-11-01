@@ -142,7 +142,7 @@ const normRect = (fx0, fy0, fx1, fy1) => {
     y1 = clamp01(Math.max(fy0, fy1));
   return { fx: x0, fy: y0, fw: clamp01(x1 - x0), fh: clamp01(y1 - y0) };
 };
-// Unclamped: allows drawing outside the image/world
+// Unclamped version (allows drawing outside the image/world)
 const normRectLoose = (fx0, fy0, fx1, fy1) => {
   const L = Math.min(num(fx0), num(fx1));
   const T = Math.min(num(fy0), num(fy1));
@@ -294,35 +294,6 @@ const styles = {
     padding: "10px 14px",
     borderRadius: 10,
     lineHeight: 1.2,
-  },
-  infoBtn: {
-    position: "absolute",
-    right: 16,
-    bottom: 16,
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    background: "rgba(0,0,0,0.05)",
-    border: "1px solid rgba(0,0,0,0.2)",
-    cursor: "pointer",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    fontSize: 20,
-    zIndex: 50,
-  },
-  infoBox: {
-    position: "absolute",
-    right: 70,
-    bottom: 20,
-    background: "#fff",
-    border: "1px solid rgba(0,0,0,0.15)",
-    borderRadius: 8,
-    padding: 12,
-    fontSize: 12,
-    color: "#333",
-    width: 260,
-    boxShadow: "0 2px 6px rgba(0,0,0,0.1)",
   },
   undoRedoBar: {
     position: "absolute",
@@ -777,7 +748,7 @@ export default function ImageCanvasApp() {
     if (!activeTool || !selecting) return;
     const { fx, fy } = getRel(e.clientX, e.clientY);
     if (!draft) { setDraft({ start: { fx, fy }, end: { fx, fy } }); return; }
-    // Unclamped rectangle so you can draw outside of the image
+    // Unclamped rectangle so you can draw outside of the image/world
     const r = normRectLoose(draft.start.fx, draft.start.fy, fx, fy);
     const id = `${activeTool}_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     const next = [...getLayer(activeTool), { id, ...r }];
@@ -1037,6 +1008,55 @@ export default function ImageCanvasApp() {
     applyZoomAt(left + width / 2, top + height / 2, m);
   };
 
+  // ---------- NEW: keep world fixed when canvas resizes ----------
+  useEffect(() => {
+    if (!canvasRef.current) return;
+
+    const getDxDy = (cw, ch, dispW, dispH, pan) => ({
+      dx: Math.floor((cw - dispW) / 2) + Math.round(num(pan.x)),
+      dy: Math.floor((ch - dispH) / 2) + Math.round(num(pan.y)),
+    });
+
+    let prevCw = null;
+    let prevCh = null;
+
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+
+      const cw = Math.round(entry.contentRect.width);
+      const ch = Math.round(entry.contentRect.height);
+      if (prevCw == null || prevCh == null) {
+        prevCw = cw;
+        prevCh = ch;
+        return;
+      }
+
+      const baseW = Math.max(1, num(bgSize.baseW) || Math.floor(cw * 0.7));
+      const baseH = Math.max(1, num(bgSize.baseH) || Math.floor(ch * 0.7));
+      const scale = Math.max(0.01, num(bgSize.scale, 1));
+      const dispW = baseW * scale;
+      const dispH = baseH * scale;
+
+      const before = getDxDy(prevCw, prevCh, dispW, dispH, bgPan);
+      const after = getDxDy(cw, ch, dispW, dispH, bgPan);
+
+      const deltaX = before.dx - after.dx;
+      const deltaY = before.dy - after.dy;
+
+      if (deltaX !== 0 || deltaY !== 0) {
+        setBgPan((p) => ({ x: num(p.x) + deltaX, y: num(p.y) + deltaY }));
+      }
+
+      prevCw = cw;
+      prevCh = ch;
+    });
+
+    ro.observe(canvasRef.current);
+    return () => ro.disconnect();
+  }, [bgSize.baseW, bgSize.baseH, bgSize.scale, bgPan.x, bgPan.y]);
+  // ---------------------------------------------------------------
+
   // toolbar
   const clearAll = () => snapshotState([], bgUrl, bgSize, [], [], []);
   const removeItem = (id) => snapshotItems(items.filter((it) => it.id !== id));
@@ -1050,7 +1070,6 @@ export default function ImageCanvasApp() {
     try {
       if (!canvasRef.current) return;
       const { bgDx, bgDy, dispW, dispH, refW, refH } = getRefFrame();
-      const exportOnlyBgArea = Boolean(dispW > 0 && dispH > 0);
 
       const outW = Math.max(1, round(dispW, 1));
       const outH = Math.max(1, round(dispH, 1));
@@ -1074,12 +1093,11 @@ export default function ImageCanvasApp() {
           img.src = bgUrl;
         });
       } else {
-        // checkerboard when no image
-        ctx.fillStyle = "#fafafa";
+        ctx.fillStyle = "#faf9f5";
         ctx.fillRect(0, 0, outW, outH);
       }
 
-      // Draw rect layers (convert base coords → BG area coords)
+      // Draw rect layers
       const drawRects = (list, color) => {
         ctx.save();
         ctx.globalAlpha = 0.35;
@@ -1087,7 +1105,7 @@ export default function ImageCanvasApp() {
         ctx.strokeStyle = color;
         for (const r of list) {
           const leftPx = round(num(r.fx) * refW) - round(num(bgDx));
-          const topPx  = round(num(r.fy) * refH) - round(num(bgDy));
+          const topPx  = round(num(r.fy) * refH)  - round(num(bgDy));
           const wPx    = round(num(r.fw) * refW);
           const hPx    = round(num(r.fh) * refH);
           ctx.fillRect(leftPx, topPx, wPx, hPx);
@@ -1390,7 +1408,7 @@ export default function ImageCanvasApp() {
       </button>
 
       {/* palette */}
-      <aside style={styles.sidebar(sidebarOpen)} aria-hidden={!sidebarOpen}>
+      <aside style={styles.sidebar(sidebarOpen)} aria-hidden={!sidebarOpen)}>
         {PALETTE.map((p) => (
           <div key={p.type} draggable onDragStart={(e) => onPaletteDragStart(e, p.type)} style={styles.paletteCard} title={`Drag ${p.label}`}>
             {Icon[p.type]?.(48)}
@@ -1426,10 +1444,8 @@ export default function ImageCanvasApp() {
                 transform: `scale(${scale})`,
                 transformOrigin: "top left",
                 pointerEvents: "none", // children re-enable where needed
-                background: bgUrl
-                  ? "transparent"
-                  : "repeating-conic-gradient(#fafafa 0% 25%, #f2f2f2 0% 50%) 0 0 / 20px 20px",
-                boxShadow: bgUrl ? "none" : "inset 0 0 0 1px rgba(0,0,0,0.08)",
+                background: "#faf9f5",  // same as app background
+                boxShadow: "none",
               }}
             >
               {bgUrl && (
