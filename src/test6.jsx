@@ -926,18 +926,19 @@ export default function ImageCanvasApp() {
       dragStartSnapshotRef.current = null;
     }
     if (panDragRef.current.active) { panDragRef.current.active = false; scheduleBgSnapshot(); }
-    pointersRef.current.delete(e.pointerId);
+    if (e?.pointerId != null) pointersRef.current.delete(e.pointerId);
     onCanvasPointerMove._lastDist = null;
     onCanvasPointerMove._lastMid = null;
   };
 
-  const onCanvasPointerCancel = () => {
-    pointersRef.current.delete?.();
+  const onCanvasPointerCancel = (e) => {
+    if (e?.pointerId != null) pointersRef.current.delete(e.pointerId);
     panDragRef.current.active = false;
     onCanvasPointerMove._lastDist = null;
     onCanvasPointerMove._lastMid = null;
     shapeResizingRef.current = { kind: null, id: null, handle: null, start: null, startLayer: null };
   };
+
   const onCanvasPointerDown = (e) => {
     if (e.pointerType === "touch")
       pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -999,8 +1000,7 @@ export default function ImageCanvasApp() {
   const onCanvasWheel = (e) => {
     if (!(e.shiftKey || e.ctrlKey)) return; // require modifier
     e.preventDefault();
-    const step = e.shiftKey && e.ctrlKey ? 0.15 : 0.1;
-    const factor = 1 + (e.deltaY < 0 ? 1 : -1) * step;
+    const factor = 1 + (e.deltaY < 0 ? 1 : -1) * (e.shiftKey && e.ctrlKey ? 0.15 : 0.1);
     applyZoomAt(e.clientX, e.clientY, factor);
   };
   const nudgeZoom = (m) => {
@@ -1008,7 +1008,7 @@ export default function ImageCanvasApp() {
     applyZoomAt(left + width / 2, top + height / 2, m);
   };
 
-  // ---------- NEW: keep world fixed when canvas resizes ----------
+  // keep world fixed when canvas resizes
   useEffect(() => {
     if (!canvasRef.current) return;
 
@@ -1055,7 +1055,6 @@ export default function ImageCanvasApp() {
     ro.observe(canvasRef.current);
     return () => ro.disconnect();
   }, [bgSize.baseW, bgSize.baseH, bgSize.scale, bgPan.x, bgPan.y]);
-  // ---------------------------------------------------------------
 
   // toolbar
   const clearAll = () => snapshotState([], bgUrl, bgSize, [], [], []);
@@ -1408,7 +1407,7 @@ export default function ImageCanvasApp() {
       </button>
 
       {/* palette */}
-      <aside style={styles.sidebar(sidebarOpen)} aria-hidden={!sidebarOpen)}>
+      <aside style={styles.sidebar(sidebarOpen)} aria-hidden={!sidebarOpen}>
         {PALETTE.map((p) => (
           <div key={p.type} draggable onDragStart={(e) => onPaletteDragStart(e, p.type)} style={styles.paletteCard} title={`Drag ${p.label}`}>
             {Icon[p.type]?.(48)}
@@ -1443,7 +1442,8 @@ export default function ImageCanvasApp() {
                 height: baseH,
                 transform: `scale(${scale})`,
                 transformOrigin: "top left",
-                pointerEvents: "none", // children re-enable where needed
+                // IMPORTANT: allow events on children
+                pointerEvents: "auto",
                 background: "#faf9f5",  // same as app background
                 boxShadow: "none",
               }}
@@ -1540,4 +1540,3 @@ export default function ImageCanvasApp() {
     </div>
   );
 }
-
