@@ -1,12 +1,10 @@
 import React, { useRef, useState, useEffect } from "react";
 
 /**
- * AtlaS – world-transform canvas (palette handle fixed)
- * - Unified zoom/pan (no drift), centered background, exact export.
- * - Rectangles keep current behavior (drag + 8 resize points).
- * - Icons have uniform resize knob (↘).
- * - Palette handle now correctly toggles sidebar, arrow flips.
- * - Undo/Redo visible and working.
+ * AtlaS – world-transform canvas (palette handle fixed + visible draft-on-draw)
+ * - Palette handle hides while panning (dragging world).
+ * - Rectangles show live draft while drawing (pointer down → move → up).
+ * - Reszta zachowania bez zmian (drag/resize, etykiety okien, ikony z ↘).
  */
 
 /* ======================= Yeat-ish bell synth ======================= */
@@ -66,7 +64,7 @@ const styles = {
   floaterBtn:{ width:44, height:44, borderRadius:22, background:"rgba(0,0,0,0)", border:"1px solid rgba(0,0,0,0.2)", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" },
   sidebar:(open)=>({ position:"absolute", top:0, left:0, bottom:0, width:180, background:"#faf9f5", borderRight:"1px solid rgba(0,0,0,.1)", transform:`translateX(${open?0:-180}px)`, transition:"transform .25s, opacity .2s", padding:12, display:"flex", flexDirection:"column", gap:12, zIndex:20, opacity:open?1:0, pointerEvents:open?"auto":"none" }),
   paletteCard:{ background:"transparent", border:"1px solid rgba(0,0,0,.1)", borderRadius:12, padding:10, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:6, cursor:"grab", textAlign:"center" },
-  toggleHandle:{ position:"absolute", top:"50%", left:0, transform:"translate(-50%, -50%)", width:28, height:64, borderRadius:14, background:"rgba(0,0,0,0.08)", border:"1px solid rgba(0,0,0,0.15)", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", fontSize:14, color:"#111", zIndex:30 },
+  toggleHandle:{ position:"absolute", top:"50%", left:0, transform:"translate(-50%, -50%)", width:28, height:64, borderRadius:14, background:"rgba(0,0,0,0.08)", border:"1px solid rgba(0,0,0,0.15)", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", fontSize:14, color:"#111", zIndex:30, transition:"opacity .15s" },
   stack:{ position:"absolute", right:12, top:"50%", transform:"translateY(-50%)", zIndex:46, width:160, display:"flex", flexDirection:"column", gap:8 },
   selectBtn:(open)=>({ width:"100%", minHeight:44, borderRadius:14, border:"1px solid rgba(0,0,0,0.2)", background:open?"#fff":"rgba(0,0,0,0.02)", cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"stretch", justifyContent:"center", fontSize:12, color:"#333" }),
   header:(open)=>({ padding:8, textAlign:"center", fontWeight:700, borderBottom:open?"1px solid rgba(0,0,0,0.1)":"none" }),
@@ -79,7 +77,7 @@ const styles = {
   world:{ position:"absolute", transformOrigin:"top left", background:"#faf9f5" },
   bgImg:{ position:"absolute", left:0, top:0, objectFit:"contain", imageRendering:"auto", borderRadius:0 },
   rect:(b,s)=>({ position:"absolute", background:b, border:`2px solid ${s}`, borderRadius:0, cursor:"move" }),
-  draft:(b,s)=>({ position:"absolute", background:b, border:`2px dashed ${s}`, borderRadius:0, pointerEvents:"none" }),
+  draft:(b,s)=>({ position:"absolute", background:b, border:`2px dashed ${s}`, borderRadius:0, pointerEvents:"none", zIndex:5 }),
   windowTag:{ position:"absolute", transform:"translateY(-110%)", background:"#fff", border:"1px solid rgba(0,0,0,0.15)", borderRadius:8, padding:"3px 6px", fontSize:11, lineHeight:1.2, color:"#064", boxShadow:"0 1px 2px rgba(0,0,0,0.06)", pointerEvents:"auto", cursor:"pointer", zIndex:12, whiteSpace:"nowrap" },
   placed:{ position:"absolute", touchAction:"none", userSelect:"none", cursor:"grab", zIndex:10, outline:"none" },
   resizeHandle:(color)=>({ position:"absolute", width:8, height:8, background:"#fff", border:`2px solid ${color}`, borderRadius:2, boxShadow:"0 1px 2px rgba(0,0,0,0.15)", zIndex:12, touchAction:"none" }),
@@ -121,6 +119,12 @@ export default function ImageCanvasApp() {
   const [selectOpen, setSelectOpen] = useState(false);
   const [selecting, setSelecting] = useState(false);
   const [draft, setDraft] = useState(null);
+
+  // NEW: flag that we are actively drawing a rect (to commit on pointerup)
+  const drawingRef = useRef(false); // NEW
+
+  // NEW: hide palette handle while panning
+  const [isPanning, setIsPanning] = useState(false); // NEW
 
   // prompt for window height
   const [windowPrompt, setWindowPrompt] = useState(null);
@@ -236,19 +240,29 @@ export default function ImageCanvasApp() {
 
   /* ============ tools ============ */
   const chooseTool = (k) => { setActiveTool(k); setSelectOpen(false); setSelecting(true); setDraft(null); };
-  const stopSelecting = () => { setSelecting(false); setDraft(null); };
+  const stopSelecting = () => { setSelecting(false); setDraft(null); drawingRef.current = false; }; // NEW
 
-  const handleCanvasClick = (e) => {
-    if (!activeTool || !selecting) return;
+  /* ============ draw rectangles: down → move → up (NEW) ============ */
+  const handleDrawPointerDown = (e) => {
+    if (!activeTool || !selecting || e.button !== 0) return;
     const pt = screenToWorld(e.clientX, e.clientY);
-    if (!draft) { setDraft({ start: { x: pt.x, y: pt.y }, end: { x: pt.x, y: pt.y } }); return; }
-    const L = Math.min(draft.start.x, pt.x), T = Math.min(draft.start.y, pt.y);
-    const R = Math.max(draft.start.x, pt.x), B = Math.max(draft.start.y, pt.y);
-    const rect = { id:`${activeTool}_${Date.now()}_${Math.random().toString(36).slice(2)}`, x:L, y:T, w:R-L, h:B-T };
+    drawingRef.current = true;                               // NEW
+    setDraft({ start: { x: pt.x, y: pt.y }, end: { x: pt.x, y: pt.y } }); // NEW
+  };
+
+  const commitDraftIfAny = () => {                           // NEW
+    if (!drawingRef.current || !draft || !activeTool) return;
+    const L = Math.min(draft.start.x, draft.end.x);
+    const T = Math.min(draft.start.y, draft.end.y);
+    const R = Math.max(draft.start.x, draft.end.x);
+    const B = Math.max(draft.start.y, draft.end.y);
+    const w = Math.max(4, R - L), h = Math.max(4, B - T);
+    const rect = { id:`${activeTool}_${Date.now()}_${Math.random().toString(36).slice(2)}`, x:L, y:T, w, h };
     if (activeTool === "wall")   snapshot({ walls:   [...walls, rect] });
     if (activeTool === "window") { snapshot({ windows: [...windows, rect] }); setWindowPrompt({ id:rect.id, value:"", error:"" }); }
     if (activeTool === "floor")  snapshot({ floors:  [...floors, rect] });
     setDraft(null);
+    drawingRef.current = false;
   };
 
   /* ============ drag / resize start ============ */
@@ -257,13 +271,16 @@ export default function ImageCanvasApp() {
     if (panKey) {
       e.preventDefault();
       panDragRef.current = { active:true, sx:e.clientX, sy:e.clientY, ox:pan.x, oy:pan.y };
+      setIsPanning(true); // NEW: hide handle
       return;
     }
+    handleDrawPointerDown(e); // NEW: start draft on simple left-click when in selecting mode
   };
 
   const onRectPointerDown = (e, kind, id) => {
     if (e.button !== 0) return;
     e.stopPropagation();
+    drawingRef.current = false; // NEW: avoid committing draft if we clicked an existing rect
     const pt = screenToWorld(e.clientX, e.clientY);
     const list = kind==="wall" ? walls : kind==="window" ? windows : floors;
     const r = list.find(x => x.id === id); if (!r) return;
@@ -274,6 +291,7 @@ export default function ImageCanvasApp() {
   const onRectHandlePointerDown = (e, kind, id, handle) => {
     if (!selecting) return;
     e.stopPropagation();
+    drawingRef.current = false; // NEW
     const list = kind==="wall" ? walls : kind==="window" ? windows : floors;
     const r = list.find(x => x.id === id); if (!r) return;
     rectResizeRef.current = { kind, id, handle, start: { ...r }, startList: list.map(x=>({ ...x })) };
@@ -283,6 +301,7 @@ export default function ImageCanvasApp() {
   const onItemPointerDown = (e, id) => {
     if (e.button !== 0) return;
     e.stopPropagation();
+    drawingRef.current = false; // NEW
     const pt = screenToWorld(e.clientX, e.clientY);
     const it = items.find(x=>x.id===id); if (!it) return;
     draggingItemRef.current = { id, dx: pt.x - it.x, dy: pt.y - it.y };
@@ -292,6 +311,7 @@ export default function ImageCanvasApp() {
   const onItemResizePointerDown = (e, id) => {
     if (e.button !== 0) return;
     e.stopPropagation();
+    drawingRef.current = false; // NEW
     const it = items.find((x) => x.id === id); if (!it) return;
     itemResizeRef.current = { id, start: Math.max(16, it.size || 48), sx: e.clientX, sy: e.clientY };
     e.currentTarget?.setPointerCapture?.(e.pointerId);
@@ -300,6 +320,12 @@ export default function ImageCanvasApp() {
   /* ============ pointer move/up ============ */
   const MIN_SIDE = 4;
   const onCanvasPointerMove = (e) => {
+    // live draft while drawing (NEW)
+    if (drawingRef.current && draft) {
+      const pt = screenToWorld(e.clientX, e.clientY);
+      setDraft((d) => d ? ({ ...d, end: { x: pt.x, y: pt.y } }) : d);
+      return;
+    }
     // pan
     if (panDragRef.current.active) {
       setPan({ x: panDragRef.current.ox + (e.clientX - panDragRef.current.sx), y: panDragRef.current.oy + (e.clientY - panDragRef.current.sy) });
@@ -358,14 +384,19 @@ export default function ImageCanvasApp() {
       setItems(prev => prev.map(it => it.id===di.id ? merge(it, { x:nx, y:ny }) : it));
       return;
     }
-    // draft preview
-    if (activeTool && selecting && draft) {
-      const pt = screenToWorld(e.clientX, e.clientY);
-      setDraft(d => ({ ...d, end: { x: pt.x, y: pt.y } }));
-    }
   };
 
   const onCanvasPointerUp = () => {
+    // end draft (commit) – NEW
+    if (drawingRef.current) {
+      commitDraftIfAny();
+    }
+    // end panning
+    if (panDragRef.current.active) {
+      panDragRef.current.active = false;
+      setIsPanning(false); // NEW: show handle back
+    }
+    // items / rects snapshots
     if (itemResizeRef.current.id) {
       itemResizeRef.current = { id:null, start:0, sx:0, sy:0 };
       snapshot({ items:[...items] });
@@ -389,7 +420,6 @@ export default function ImageCanvasApp() {
       if (k==="window") snapshot({ windows:[...list] });
       if (k==="floor") snapshot({ floors:[...list] });
     }
-    if (panDragRef.current.active) panDragRef.current.active = false;
   };
 
   /* ============ zoom ============ */
@@ -474,6 +504,9 @@ export default function ImageCanvasApp() {
       const ctx = canvas.getContext("2d"); if (!ctx) return;
       ctx.scale(dpr, dpr);
 
+      const offX = (world.w - bgImg.w) / 2, offY = (world.h - bgImg.h) / 2;
+
+      // draw bg
       if (bgUrl) {
         await new Promise((resolve) => {
           const img = new Image();
@@ -484,8 +517,7 @@ export default function ImageCanvasApp() {
         ctx.fillStyle = "#faf9f5"; ctx.fillRect(0, 0, outW, outH);
       }
 
-      const bgOffset = { x: (world.w - bgImg.w) / 2, y: (world.h - bgImg.h) / 2 };
-      const toShot = (wx, wy) => ({ sx: (wx - bgOffset.x) * world.scale, sy: (wy - bgOffset.y) * world.scale });
+      const toShot = (wx, wy) => ({ sx: (wx - offX) * world.scale, sy: (wy - offY) * world.scale });
 
       const drawRects = (list, color) => {
         ctx.save(); ctx.globalAlpha = 0.35; ctx.fillStyle = color; ctx.strokeStyle = color;
@@ -498,6 +530,7 @@ export default function ImageCanvasApp() {
       };
       drawRects(floors, "#0a28a0"); drawRects(walls, "#ff4da6"); drawRects(windows, "#00a050");
 
+      // draw items
       for (const it of items) {
         const node = document.getElementById(it.id); const svg = node?.querySelector?.("svg"); if (!svg) continue;
         const { sx, sy } = toShot(it.x, it.y);
@@ -590,25 +623,25 @@ export default function ImageCanvasApp() {
           </div>
           {selectOpen && (
             <div style={styles.menu}>
-              <div style={styles.item(activeTool==="wall",   "#ff4da6")} onClick={()=>setActiveTool("wall") || setSelecting(true)}>Walls</div>
-              <div style={styles.item(activeTool==="window", "#00a050")} onClick={()=>setActiveTool("window") || setSelecting(true)}>Windows</div>
-              <div style={styles.item(activeTool==="floor",  "#0a28a0")} onClick={()=>setActiveTool("floor") || setSelecting(true)}>Floor</div>
+              <div style={styles.item(activeTool==="wall",   "#ff4da6")} onClick={()=>{setActiveTool("wall"); setSelecting(true);}}>Walls</div>
+              <div style={styles.item(activeTool==="window", "#00a050")} onClick={()=>{setActiveTool("window"); setSelecting(true);}}>Windows</div>
+              <div style={styles.item(activeTool==="floor",  "#0a28a0")} onClick={()=>{setActiveTool("floor"); setSelecting(true);}}>Floor</div>
             </div>
           )}
         </div>
         <button style={styles.stopBtn} onClick={stopSelecting} aria-label="Stop selecting">Stop selecting</button>
       </div>
 
-      {/* palette handle (FIXED) */}
+      {/* palette handle — hides while panning (NEW) */}
       <button
         aria-label="Toggle palette"
         onClick={() => setSidebarOpen((v) => !v)}
-        style={styles.toggleHandle}
+        style={{ ...styles.toggleHandle, opacity: isPanning ? 0 : 1 }}
       >
         {sidebarOpen ? "‹" : "›"}
       </button>
 
-      {/* palette (FIXED) */}
+      {/* palette */}
       <aside style={styles.sidebar(sidebarOpen)} aria-hidden={!sidebarOpen}>
         {PALETTE.map((p) => (
           <div
@@ -628,7 +661,6 @@ export default function ImageCanvasApp() {
       <div
         ref={canvasRef}
         style={{ position:"relative", width:"100%", height:"100%", overflow:"hidden" }}
-        onClick={handleCanvasClick}
         onPointerMove={onCanvasPointerMove}
         onPointerUp={onCanvasPointerUp}
         onPointerDown={onWorldPointerDown}
@@ -640,12 +672,14 @@ export default function ImageCanvasApp() {
         {/* World (everything inside scales & pans together) */}
         <div
           style={{
-            ...styles.world,
+            position:"absolute",
             left: getRefFrame().worldLeft,
             top:  getRefFrame().worldTop,
             width: world.w,
             height: world.h,
             transform: `scale(${world.scale})`,
+            transformOrigin: "top left",
+            background: "#faf9f5",
           }}
         >
           {/* Background image centered inside world */}
@@ -742,7 +776,7 @@ export default function ImageCanvasApp() {
             );
           })}
 
-          {/* Draft rectangle (while placing) */}
+          {/* Draft rectangle (visible while drawing) – NEW */}
           {activeTool && selecting && draft && (() => {
             const L = Math.min(draft.start.x, draft.end.x), T = Math.min(draft.start.y, draft.end.y);
             const W = Math.abs(draft.end.x - draft.start.x), H = Math.abs(draft.end.y - draft.start.y);
