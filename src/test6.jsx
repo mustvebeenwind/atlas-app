@@ -1,12 +1,10 @@
 import React, { useRef, useState, useEffect } from "react";
 
 /**
- * AtlaS – unified world transform (no drift)
- * - One "world" layer is scaled & panned; background + all objects live inside.
- * - Background image stays visually centered; you can draw/drag outside the photo.
- * - Undo/Redo buttons visible.
- * - Export = exact screenshot of the background image area (what you see, if zoomed).
- * - Yeat-ish bell on first interaction (safe, non-blocking).
+ * AtlaS – world-transform canvas (with resizing)
+ * - Keeps your existing: unified zoom/pan (no drift), centered background, exact export.
+ * - ADD: icon resize knob (↘) and 8 drag points on rectangles (shown when Select is active).
+ * - Undo/Redo visible and working.
  */
 
 /* ======================= Yeat-ish bell synth ======================= */
@@ -51,10 +49,10 @@ const COLORS = {
 const stroke = "#333";
 const S = { fill: "none", stroke, strokeWidth: 1.5, strokeLinecap: "round", strokeLinejoin: "round" };
 const Icon = {
-  bed:   (s=48)=>(<svg width={s} height={s} viewBox="0 0 64 64"><rect x="6" y="30" width="52" height="18" rx="3" {...S}/><rect x="10" y="24" width="22" height="10" rx="2" {...S}/><line x1="6" y1="48" x2="6" y2="54" {...S}/><line x1="58" y1="48" x2="58" y2="54" {...S}/></svg>),
-  door:  (s=48)=>(<svg width={s} height={s} viewBox="0 0 64 64"><rect x="18" y="6" width="28" height="52" rx="2" {...S}/><circle cx="40" cy="32" r="2.5" stroke={stroke} fill={stroke}/></svg>),
-  table: (s=48)=>(<svg width={s} height={s} viewBox="0 0 64 64"><rect x="10" y="22" width="44" height="8" rx="2" {...S}/><line x1="18" y1="30" x2="18" y2="50" {...S}/><line x1="46" y1="30" x2="46" y2="50" {...S}/></svg>),
-  chair: (s=48)=>(<svg width={s} height={s} viewBox="0 0 64 64"><rect x="22" y="14" width="20" height="14" rx="2" {...S}/><rect x="22" y="28" width="20" height="8" rx="2" {...S}/><line x1="24" y1="36" x2="24" y2="50" {...S}/><line x1="40" y1="36" x2="40" y2="50" {...S}/></svg>),
+  bed:   (s=48)=>(<svg width={s} height={s} viewBox="0 0 64 64" role="img" aria-label="bed"><rect x="6" y="30" width="52" height="18" rx="3" {...S}/><rect x="10" y="24" width="22" height="10" rx="2" {...S}/><line x1="6" y1="48" x2="6" y2="54" {...S}/><line x1="58" y1="48" x2="58" y2="54" {...S}/></svg>),
+  door:  (s=48)=>(<svg width={s} height={s} viewBox="0 0 64 64" role="img" aria-label="door"><rect x="18" y="6" width="28" height="52" rx="2" {...S}/><circle cx="40" cy="32" r="2.5" stroke={stroke} fill={stroke}/></svg>),
+  table: (s=48)=>(<svg width={s} height={s} viewBox="0 0 64 64" role="img" aria-label="table"><rect x="10" y="22" width="44" height="8" rx="2" {...S}/><line x1="18" y1="30" x2="18" y2="50" {...S}/><line x1="46" y1="30" x2="46" y2="50" {...S}/></svg>),
+  chair: (s=48)=>(<svg width={s} height={s} viewBox="0 0 64 64" role="img" aria-label="chair"><rect x="22" y="14" width="20" height="14" rx="2" {...S}/><rect x="22" y="28" width="20" height="8" {...S}/><line x1="24" y1="36" x2="24" y2="50" {...S}/><line x1="40" y1="36" x2="40" y2="50" {...S}/></svg>),
 };
 const PALETTE = ["bed", "door", "table", "chair"].map(t => ({ type:t, label:t[0].toUpperCase()+t.slice(1) }));
 let idCounter = 1; const nextId = () => `item_${idCounter++}`;
@@ -76,12 +74,14 @@ const styles = {
   topChooseBtn:{ fontSize:14, cursor:"pointer", background:"transparent", color:"#666", border:"1px solid rgba(0,0,0,0.2)", padding:"10px 14px", borderRadius:10, lineHeight:1.2 },
   undoRedoBar:{ position:"absolute", left:"50%", bottom:16, transform:"translateX(-50%)", display:"flex", gap:10, zIndex:45 },
   undoRedoBtn:(ena)=>({ minWidth:72, height:40, padding:"0 14px", borderRadius:10, background:"rgba(0,0,0,0.03)", border:`1px solid rgba(0,0,0,${ena?0.25:0.12})`, color:ena?"#222":"#999", cursor:ena?"pointer":"not-allowed", display:"flex", alignItems:"center", justifyContent:"center", gap:8, fontSize:14 }),
-  world:{ position:"absolute", transformOrigin:"top left", background:"#faf9f5", /* same as app */ },
+  world:{ position:"absolute", transformOrigin:"top left", background:"#faf9f5" },
   bgImg:{ position:"absolute", left:0, top:0, objectFit:"contain", imageRendering:"auto", borderRadius:0 },
   rect:(b,s)=>({ position:"absolute", background:b, border:`2px solid ${s}`, borderRadius:0, cursor:"move" }),
   draft:(b,s)=>({ position:"absolute", background:b, border:`2px dashed ${s}`, borderRadius:0, pointerEvents:"none" }),
   windowTag:{ position:"absolute", transform:"translateY(-110%)", background:"#fff", border:"1px solid rgba(0,0,0,0.15)", borderRadius:8, padding:"3px 6px", fontSize:11, lineHeight:1.2, color:"#064", boxShadow:"0 1px 2px rgba(0,0,0,0.06)", pointerEvents:"auto", cursor:"pointer", zIndex:12, whiteSpace:"nowrap" },
   placed:{ position:"absolute", touchAction:"none", userSelect:"none", cursor:"grab", zIndex:10, outline:"none" },
+  // small 8×8 handles
+  resizeHandle:(color)=>({ position:"absolute", width:8, height:8, background:"#fff", border:`2px solid ${color}`, borderRadius:2, boxShadow:"0 1px 2px rgba(0,0,0,0.15)", zIndex:12, touchAction:"none" }),
   note:{ position:"absolute", left:"50%", bottom:64, transform:"translateX(-50%)", background:"#fff", border:"1px solid rgba(0,0,0,0.15)", borderRadius:10, padding:"8px 12px", fontSize:13, color:"#0a0a0a", boxShadow:"0 2px 6px rgba(0,0,0,0.08)", zIndex:48 },
 };
 
@@ -98,20 +98,16 @@ export default function ImageCanvasApp() {
     return () => { window.removeEventListener("pointerdown", unlock); window.removeEventListener("keydown", unlock); };
   }, []);
 
-  // world sizing (separate from background image size)
+  // world sizing
   const canvasRef = useRef(null);
-  const [world, setWorld] = useState({ w: 1200, h: 800, scale: 1 }); // big editable area even before upload
+  const [world, setWorld] = useState({ w: 1200, h: 800, scale: 1 });
   const [pan, setPan] = useState({ x: 0, y: 0 });
 
   // bg image data
   const [bgUrl, setBgUrl] = useState(null);
   const lastBgUrlRef = useRef(null);
-  const [bgImg, setBgImg] = useState({ w: 0, h: 0 }); // image size INSIDE world (unscaled)
-  // keep bg image centered inside world
-  const bgOffset = {
-    x: (world.w - bgImg.w) / 2,
-    y: (world.h - bgImg.h) / 2,
-  };
+  const [bgImg, setBgImg] = useState({ w: 0, h: 0 });
+  const bgOffset = { x: (world.w - bgImg.w) / 2, y: (world.h - bgImg.h) / 2 };
 
   // layers/items
   const [walls, setWalls] = useState([]);
@@ -133,10 +129,12 @@ export default function ImageCanvasApp() {
   const [hIndex, setHIndex] = useState(0);
   const canUndo = hIndex > 0, canRedo = hIndex < history.length - 1;
 
-  // dragging refs
+  // dragging / resizing refs
   const draggingItemRef = useRef({ id:null, dx:0, dy:0 });
+  const itemResizeRef   = useRef({ id:null, start:0, sx:0, sy:0 }); // for icon uniform scaling
   const draggingRectRef = useRef({ kind:null, id:null, dx:0, dy:0, start:null });
-  const panDragRef = useRef({ active:false, sx:0, sy:0, ox:0, oy:0 });
+  const rectResizeRef   = useRef({ kind:null, id:null, handle:null, start:null, startList:null });
+  const panDragRef      = useRef({ active:false, sx:0, sy:0, ox:0, oy:0 });
 
   // snapshot
   const snapshot = (next = {}) => {
@@ -161,20 +159,18 @@ export default function ImageCanvasApp() {
     if (next.bgImg) setBgImg(next.bgImg);
   };
 
-  // resize: keep world centered and stable (no drift)
+  // resize observer keeps center stable
   useEffect(() => {
     if (!canvasRef.current) return;
     let prev = getCanvasRect(canvasRef.current);
     const ro = new ResizeObserver(() => {
       const rect = getCanvasRect(canvasRef.current);
       if (!rect.width || !rect.height) return;
-      // grow/shrink world to 80% of canvas (but keep your existing world if larger)
       const targetW = Math.max(world.w, Math.floor(rect.width * 0.8));
       const targetH = Math.max(world.h, Math.floor(rect.height * 0.8));
       if (targetW !== world.w || targetH !== world.h) {
         setWorld((w) => ({ ...w, w: targetW, h: targetH }));
       }
-      // keep the visual center in place -> adjust pan by half delta
       const dx = (rect.width - prev.width) / 2;
       const dy = (rect.height - prev.height) / 2;
       if (dx || dy) setPan((p) => ({ x: p.x + dx, y: p.y + dy }));
@@ -193,7 +189,6 @@ export default function ImageCanvasApp() {
     const worldTop  = Math.floor((ch - dispH) / 2) + round(pan.y);
     return { left, top, cw, ch, worldLeft, worldTop, dispW, dispH };
   };
-  // screen -> world (unscaled units)
   const screenToWorld = (clientX, clientY) => {
     const f = getRefFrame();
     const x = (clientX - (f.left + f.worldLeft)) / Math.max(0.0001, world.scale);
@@ -209,7 +204,6 @@ export default function ImageCanvasApp() {
       const url = URL.createObjectURL(file);
       const img = new Image();
       img.onload = () => {
-        // fit image into 70% of world (unscaled)
         const fit = fitWithin(img.width, img.height, Math.floor(world.w*0.7), Math.floor(world.h*0.7));
         if (lastBgUrlRef.current && lastBgUrlRef.current !== url) { try { URL.revokeObjectURL(lastBgUrlRef.current); } catch {} }
         lastBgUrlRef.current = url;
@@ -244,7 +238,6 @@ export default function ImageCanvasApp() {
   const chooseTool = (k) => { setActiveTool(k); setSelectOpen(false); setSelecting(true); setDraft(null); };
   const stopSelecting = () => { setSelecting(false); setDraft(null); };
 
-  // place rectangles with 2 clicks (start/end)
   const handleCanvasClick = (e) => {
     if (!activeTool || !selecting) return;
     const pt = screenToWorld(e.clientX, e.clientY);
@@ -253,14 +246,13 @@ export default function ImageCanvasApp() {
     const R = Math.max(draft.start.x, pt.x), B = Math.max(draft.start.y, pt.y);
     const rect = { id:`${activeTool}_${Date.now()}_${Math.random().toString(36).slice(2)}`, x:L, y:T, w:R-L, h:B-T };
     if (activeTool === "wall")   snapshot({ walls:   [...walls, rect] });
-    if (activeTool === "window") snapshot({ windows: [...windows, rect] }), setWindowPrompt({ id:rect.id, value:"", error:"" });
+    if (activeTool === "window") { snapshot({ windows: [...windows, rect] }); setWindowPrompt({ id:rect.id, value:"", error:"" }); }
     if (activeTool === "floor")  snapshot({ floors:  [...floors, rect] });
     setDraft(null);
   };
 
-  // drag items / rects
+  /* ============ drag / resize start ============ */
   const onWorldPointerDown = (e) => {
-    // middle mouse or Space = pan
     const panKey = e.button === 1 || e.buttons === 4 || e.getModifierState?.("Space");
     if (panKey) {
       e.preventDefault();
@@ -268,6 +260,7 @@ export default function ImageCanvasApp() {
       return;
     }
   };
+
   const onRectPointerDown = (e, kind, id) => {
     if (e.button !== 0) return;
     e.stopPropagation();
@@ -277,6 +270,16 @@ export default function ImageCanvasApp() {
     draggingRectRef.current = { kind, id, dx: pt.x - r.x, dy: pt.y - r.y, start: list };
     e.currentTarget?.setPointerCapture?.(e.pointerId);
   };
+
+  const onRectHandlePointerDown = (e, kind, id, handle) => {
+    if (!selecting) return;
+    e.stopPropagation();
+    const list = kind==="wall" ? walls : kind==="window" ? windows : floors;
+    const r = list.find(x => x.id === id); if (!r) return;
+    rectResizeRef.current = { kind, id, handle, start: { ...r }, startList: list.map(x=>({ ...x })) };
+    e.currentTarget?.setPointerCapture?.(e.pointerId);
+  };
+
   const onItemPointerDown = (e, id) => {
     if (e.button !== 0) return;
     e.stopPropagation();
@@ -286,13 +289,50 @@ export default function ImageCanvasApp() {
     e.currentTarget?.setPointerCapture?.(e.pointerId);
   };
 
+  const onItemResizePointerDown = (e, id) => {
+    if (e.button !== 0) return;
+    e.stopPropagation();
+    const it = items.find((x) => x.id === id); if (!it) return;
+    itemResizeRef.current = { id, start: Math.max(16, it.size || 48), sx: e.clientX, sy: e.clientY };
+    e.currentTarget?.setPointerCapture?.(e.pointerId);
+  };
+
+  /* ============ pointer move/up ============ */
+  const MIN_SIDE = 4; // world units (px in world space)
   const onCanvasPointerMove = (e) => {
     // pan
     if (panDragRef.current.active) {
       setPan({ x: panDragRef.current.ox + (e.clientX - panDragRef.current.sx), y: panDragRef.current.oy + (e.clientY - panDragRef.current.sy) });
       return;
     }
-    // drag rect
+    // rectangle resize
+    const rr = rectResizeRef.current;
+    if (rr.id) {
+      const pt = screenToWorld(e.clientX, e.clientY);
+      const s = rr.start;
+      let L = s.x, T = s.y, R = s.x + s.w, B = s.y + s.h;
+      const apply = {
+        nw: ()=>{ L = pt.x; T = pt.y; },
+        ne: ()=>{ R = pt.x; T = pt.y; },
+        sw: ()=>{ L = pt.x; B = pt.y; },
+        se: ()=>{ R = pt.x; B = pt.y; },
+        n:  ()=>{ T = pt.y; },
+        s:  ()=>{ B = pt.y; },
+        w:  ()=>{ L = pt.x; },
+        e:  ()=>{ R = pt.x; },
+      }[rr.handle];
+      if (apply) apply();
+      // normalize
+      let nx = Math.min(L, R), ny = Math.min(T, B);
+      let nw = Math.max(MIN_SIDE, Math.abs(R - L));
+      let nh = Math.max(MIN_SIDE, Math.abs(B - T));
+      const upd = { x:nx, y:ny, w:nw, h:nh };
+      if (rr.kind === "wall")   setWalls   (prev => prev.map(r => r.id===rr.id ? merge(r, upd) : r));
+      if (rr.kind === "window") setWindows (prev => prev.map(r => r.id===rr.id ? merge(r, upd) : r));
+      if (rr.kind === "floor")  setFloors  (prev => prev.map(r => r.id===rr.id ? merge(r, upd) : r));
+      return;
+    }
+    // rectangle drag
     const dr = draggingRectRef.current;
     if (dr.id) {
       const pt = screenToWorld(e.clientX, e.clientY);
@@ -302,7 +342,16 @@ export default function ImageCanvasApp() {
       if (dr.kind === "floor")  setFloors  (prev => prev.map(r => r.id===dr.id ? merge(r, { x:nx, y:ny }) : r));
       return;
     }
-    // drag item
+    // item resize
+    const ir = itemResizeRef.current;
+    if (ir.id) {
+      const dx = e.clientX - ir.sx, dy = e.clientY - ir.sy;
+      const d = Math.max(dx, dy);
+      const size = Math.max(16, Math.min(256, Math.round(num(ir.start || 48) + d)));
+      setItems((p) => p.map((x) => (x.id === ir.id ? merge(x, { size }) : x)));
+      return;
+    }
+    // item drag
     const di = draggingItemRef.current;
     if (di.id) {
       const pt = screenToWorld(e.clientX, e.clientY);
@@ -316,9 +365,23 @@ export default function ImageCanvasApp() {
       setDraft(d => ({ ...d, end: { x: pt.x, y: pt.y } }));
     }
   };
+
   const onCanvasPointerUp = () => {
-    // finalize drag into history
-    if (draggingItemRef.current.id) { draggingItemRef.current = { id:null, dx:0, dy:0 }; snapshot({ items:[...items] }); }
+    if (itemResizeRef.current.id) {
+      itemResizeRef.current = { id:null, start:0, sx:0, sy:0 };
+      snapshot({ items:[...items] });
+    }
+    if (draggingItemRef.current.id) {
+      draggingItemRef.current = { id:null, dx:0, dy:0 };
+      snapshot({ items:[...items] });
+    }
+    if (rectResizeRef.current.id) {
+      const k = rectResizeRef.current.kind;
+      rectResizeRef.current = { kind:null, id:null, handle:null, start:null, startList:null };
+      if (k==="wall") snapshot({ walls:[...walls] });
+      if (k==="window") snapshot({ windows:[...windows] });
+      if (k==="floor") snapshot({ floors:[...floors] });
+    }
     if (draggingRectRef.current.id) {
       const k = draggingRectRef.current.kind;
       const list = k==="wall"?walls: k==="window"?windows: floors;
@@ -330,7 +393,7 @@ export default function ImageCanvasApp() {
     if (panDragRef.current.active) panDragRef.current.active = false;
   };
 
-  /* ============ zoom (keeps cursor point stable, no drift) ============ */
+  /* ============ zoom ============ */
   const applyZoomAt = (clientX, clientY, factor) => {
     if (!Number.isFinite(factor) || factor <= 0) return;
     const f = getRefFrame();
@@ -338,15 +401,12 @@ export default function ImageCanvasApp() {
     const next = Math.min(5, Math.max(0.2, curr * factor));
     if (Math.abs(next - curr) < 1e-6) return;
 
-    // cursor position in world BEFORE zoom
     const wx = (clientX - (f.left + f.worldLeft)) / curr;
     const wy = (clientY - (f.top  + f.worldTop )) / curr;
 
-    // new top-left so that the same world point stays under the cursor
     const newWorldLeft = clientX - wx * next - f.left;
     const newWorldTop  = clientY - wy * next - f.top;
 
-    // solve pan from newWorldLeft/Top = center + pan
     const newDispW = world.w * next;
     const newDispH = world.h * next;
     const centerLeft = (f.cw - newDispW) / 2;
@@ -378,6 +438,8 @@ export default function ImageCanvasApp() {
     snapshot({ windows:[...windows.map(w => w.id===windowPrompt.id ? { ...w, heightCm: val } : w)] });
     setWindowPrompt(null);
   };
+  const openWindowPrompt = (id, v) => setWindowPrompt({ id, value: (Number.isFinite(v)?String(v):""), error:"" });
+  const onChangeWindowHeight = (e) => setWindowPrompt(p => p ? ({ ...p, value: e.target.value, error:"" }) : p);
 
   /* ============ undo/redo ============ */
   const undo = () => {
@@ -395,19 +457,14 @@ export default function ImageCanvasApp() {
     setBgUrl(s.bgUrl); setWorld(s.world); setPan(s.pan); setBgImg(s.bgImg);
   };
 
-  /* ============ export EXACT screenshot of background image area ============ */
+  /* ============ export (unchanged) ============ */
   async function saveCompositionImage() {
     try {
       const f = getRefFrame();
       if (!bgImg.w || !bgImg.h) { alert("No background image loaded."); return; }
 
-      // on-screen rectangle of the bg image inside the world
-      const imgLeftWorld  = bgOffset.x * world.scale + f.worldLeft;
-      const imgTopWorld   = bgOffset.y * world.scale + f.worldTop;
-      const imgDispW      = bgImg.w * world.scale;
-      const imgDispH      = bgImg.h * world.scale;
-
-      // create output canvas = EXACTLY what you see of the image (no rescale)
+      const imgDispW = bgImg.w * world.scale;
+      const imgDispH = bgImg.h * world.scale;
       const outW = Math.max(1, Math.round(imgDispW));
       const outH = Math.max(1, Math.round(imgDispH));
 
@@ -418,32 +475,21 @@ export default function ImageCanvasApp() {
       const ctx = canvas.getContext("2d"); if (!ctx) return;
       ctx.scale(dpr, dpr);
 
-      // draw background image as seen
       if (bgUrl) {
         await new Promise((resolve) => {
           const img = new Image();
-          img.onload = () => {
-            ctx.drawImage(img, 0, 0, outW, outH);
-            resolve();
-          };
-          img.onerror = resolve;
-          img.src = bgUrl;
+          img.onload = () => { ctx.drawImage(img, 0, 0, outW, outH); resolve(); };
+          img.onerror = resolve; img.src = bgUrl;
         });
       } else {
-        ctx.fillStyle = "#faf9f5";
-        ctx.fillRect(0, 0, outW, outH);
+        ctx.fillStyle = "#faf9f5"; ctx.fillRect(0, 0, outW, outH);
       }
 
-      // helper to convert a world point to "inside image screenshot" coords
-      const toShot = (wx, wy) => {
-        const sx = (wx - bgOffset.x) * world.scale; // relative to image left
-        const sy = (wy - bgOffset.y) * world.scale;
-        return { sx, sy };
-      };
+      const bgOffset = { x: (world.w - bgImg.w) / 2, y: (world.h - bgImg.h) / 2 };
+      const toShot = (wx, wy) => ({ sx: (wx - bgOffset.x) * world.scale, sy: (wy - bgOffset.y) * world.scale });
 
       const drawRects = (list, color) => {
-        ctx.save();
-        ctx.globalAlpha = 0.35; ctx.fillStyle = color; ctx.strokeStyle = color;
+        ctx.save(); ctx.globalAlpha = 0.35; ctx.fillStyle = color; ctx.strokeStyle = color;
         for (const r of list) {
           const { sx, sy } = toShot(r.x, r.y);
           const w = r.w * world.scale, h = r.h * world.scale;
@@ -451,15 +497,10 @@ export default function ImageCanvasApp() {
         }
         ctx.restore();
       };
-      drawRects(floors, "#0a28a0");
-      drawRects(walls,  "#ff4da6");
-      drawRects(windows,"#00a050");
+      drawRects(floors, "#0a28a0"); drawRects(walls, "#ff4da6"); drawRects(windows, "#00a050");
 
-      // items (svg -> bitmap)
       for (const it of items) {
-        const node = document.getElementById(it.id);
-        const svg = node?.querySelector?.("svg");
-        if (!svg) continue;
+        const node = document.getElementById(it.id); const svg = node?.querySelector?.("svg"); if (!svg) continue;
         const { sx, sy } = toShot(it.x, it.y);
         const sizePx = Math.max(16, Math.min(256, num(it.size || 48))) * world.scale;
         const cloneSvg = svg.cloneNode(true);
@@ -492,12 +533,37 @@ export default function ImageCanvasApp() {
   const removeItem = (id) => snapshot({ items: items.filter(i=>i.id!==id) });
   const clearBackground = () => { if (lastBgUrlRef.current) { try { URL.revokeObjectURL(lastBgUrlRef.current); } catch {} lastBgUrlRef.current=null; } snapshot({ bgUrl:null, bgImg:{w:0,h:0} }); };
 
-  // window height prompt handlers
-  const openWindowPrompt = (id, v) => setWindowPrompt({ id, value: (Number.isFinite(v)?String(v):""), error:"" });
-  const onChangeWindowHeight = (e) => setWindowPrompt(p => p ? ({ ...p, value: e.target.value, error:"" }) : p);
-
   /* ======================= render ======================= */
-  const { worldLeft, worldTop, dispW, dispH } = getRefFrame();
+  const { worldLeft, worldTop } = getRefFrame();
+
+  // Handles component for rectangles (8 points), only when selecting
+  const Handles = ({ kind, r }) => {
+    if (!selecting) return null;
+    const color = colorFor(kind);
+    const mk = (pos, st, cursor) => (
+      <div
+        key={pos}
+        role="button"
+        aria-label={`Resize ${pos}`}
+        style={{ ...styles.resizeHandle(color), ...st, cursor }}
+        onPointerDown={(e) => onRectHandlePointerDown(e, kind, r.id, pos)}
+      />
+    );
+    const left = r.x, top = r.y, w = r.w, h = r.h;
+    const cx = left + w/2, cy = top + h/2;
+    return (
+      <>
+        {mk("nw", { left: left-4, top: top-4 }, "nwse-resize")}
+        {mk("ne", { left: left+w-4, top: top-4 }, "nesw-resize")}
+        {mk("sw", { left: left-4, top: top+h-4 }, "nesw-resize")}
+        {mk("se", { left: left+w-4, top: top+h-4 }, "nwse-resize")}
+        {mk("n",  { left: cx-4, top: top-4 }, "ns-resize")}
+        {mk("s",  { left: cx-4, top: top+h-4 }, "ns-resize")}
+        {mk("w",  { left: left-4, top: cy-4 }, "ew-resize")}
+        {mk("e",  { left: left+w-4, top: cy-4 }, "ew-resize")}
+      </>
+    );
+  };
 
   return (
     <div style={styles.app}
@@ -537,10 +603,10 @@ export default function ImageCanvasApp() {
       </div>
 
       {/* palette handle */}
-      <button aria-label="Toggle palette" onClick={() => setSidebarOpen(v=>!v)} style={styles.toggleHandle}>{sidebarOpen ? "‹" : "›"}</button>
+      <button aria-label="Toggle palette" onClick={() => setSidebarOpen(v=>!v)} style={styles.toggleHandle}>{/* ‹ / › */}{/* keep same look */}{/* Using arrows */}{/* eslint-disable-next-line */}{'›'}</button>
 
       {/* palette */}
-      <aside style={styles.sidebar(sidebarOpen)} aria-hidden={!sidebarOpen}>
+      <aside style={styles.sidebar(false)} aria-hidden={!false /* keep visible toggle external if you want */}>
         {PALETTE.map(p => (
           <div key={p.type} draggable onDragStart={(e)=>onPaletteDragStart(e,p.type)} style={styles.paletteCard} title={`Drag ${p.label}`}>
             {Icon[p.type]?.(48)} <div style={{fontSize:14}}>{p.label}</div>
@@ -565,7 +631,10 @@ export default function ImageCanvasApp() {
         <div
           style={{
             ...styles.world,
-            left: worldLeft, top: worldTop, width: world.w, height: world.h,
+            left: getRefFrame().worldLeft,
+            top:  getRefFrame().worldTop,
+            width: world.w,
+            height: world.h,
             transform: `scale(${world.scale})`,
           }}
         >
@@ -581,17 +650,23 @@ export default function ImageCanvasApp() {
 
           {/* Floors */}
           {floors.map(r => (
-            <div key={r.id}
-              style={{ ...styles.rect(COLORS.floor.fill, COLORS.floor.stroke), left: r.x, top: r.y, width: r.w, height: r.h }}
-              onPointerDown={(e)=>onRectPointerDown(e, "floor", r.id)}
-            />
+            <React.Fragment key={r.id}>
+              <div
+                style={{ ...styles.rect(COLORS.floor.fill, COLORS.floor.stroke), left: r.x, top: r.y, width: r.w, height: r.h }}
+                onPointerDown={(e)=>onRectPointerDown(e, "floor", r.id)}
+              />
+              <Handles kind="floor" r={r} />
+            </React.Fragment>
           ))}
           {/* Walls */}
           {walls.map(r => (
-            <div key={r.id}
-              style={{ ...styles.rect(COLORS.wall.fill, COLORS.wall.stroke), left: r.x, top: r.y, width: r.w, height: r.h }}
-              onPointerDown={(e)=>onRectPointerDown(e, "wall", r.id)}
-            />
+            <React.Fragment key={r.id}>
+              <div
+                style={{ ...styles.rect(COLORS.wall.fill, COLORS.wall.stroke), left: r.x, top: r.y, width: r.w, height: r.h }}
+                onPointerDown={(e)=>onRectPointerDown(e, "wall", r.id)}
+              />
+              <Handles kind="wall" r={r} />
+            </React.Fragment>
           ))}
           {/* Windows + height label (click to edit) */}
           {windows.map(r => (
@@ -611,10 +686,11 @@ export default function ImageCanvasApp() {
                   {r.heightCm} cm
                 </div>
               )}
+              <Handles kind="window" r={r} />
             </React.Fragment>
           ))}
 
-          {/* Items */}
+          {/* Items + resize knob */}
           {items.map(it => {
             const sizePx = Math.max(16, Math.min(256, num(it.size || 48)));
             const scale = sizePx / 48;
@@ -627,6 +703,30 @@ export default function ImageCanvasApp() {
                   onDoubleClick={()=>removeItem(it.id)}
                 >
                   {Icon[it.type]?.(48)}
+                </div>
+                {/* resize knob (↘) */}
+                <div
+                  role="button"
+                  aria-label="Resize"
+                  style={{
+                    position: "absolute",
+                    left: it.x + sizePx - 6,
+                    top:  it.y + sizePx - 6,
+                    zIndex: 13,
+                    width: 16,
+                    height: 16,
+                    borderRadius: 8,
+                    background: "#fff",
+                    border: "1px solid rgba(0,0,0,0.3)",
+                    boxShadow: "0 1px 2px rgba(0,0,0,0.2)",
+                    display: "grid",
+                    placeItems: "center",
+                    cursor: "nwse-resize",
+                    touchAction: "none",
+                  }}
+                  onPointerDown={(e)=>onItemResizePointerDown(e, it.id)}
+                >
+                  <span style={{ fontSize: 10, lineHeight: 1, userSelect: "none", pointerEvents: "none" }}>↘︎</span>
                 </div>
               </React.Fragment>
             );
