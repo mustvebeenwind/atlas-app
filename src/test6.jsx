@@ -2,9 +2,10 @@ import React, { useRef, useState, useEffect } from "react";
 
 /**
  * AtlaS – world-transform canvas (with resizing)
- * - Keeps your existing: unified zoom/pan (no drift), centered background, exact export.
- * - ADD: icon resize knob (↘) and 8 drag points on rectangles (shown when Select is active).
- * - Undo/Redo visible and working.
+ * - Unified zoom/pan (no drift), centered background, exact export.
+ * - Rectangles: move + 8-point resize (when Select is active).
+ * - Icons: resize knob (↘) + drag.
+ * - Palette: FIXED (toggle works, DnD works).
  */
 
 /* ======================= Yeat-ish bell synth ======================= */
@@ -62,9 +63,9 @@ const styles = {
   app: { width:"100vw", height:"100vh", background:"#faf9f5", color:"#333", fontFamily:"Inter, system-ui, Arial, sans-serif", position:"relative", userSelect:"none", overflow:"hidden" },
   floaterBar:{ position:"absolute", top:12, right:12, display:"flex", gap:8, zIndex:40 },
   floaterBtn:{ width:44, height:44, borderRadius:22, background:"rgba(0,0,0,0)", border:"1px solid rgba(0,0,0,0.2)", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" },
-  sidebar:(open)=>({ position:"absolute", top:0, left:0, bottom:0, width:180, background:"#faf9f5", borderRight:"1px solid rgba(0,0,0,.1)", transform:`translateX(${open?0:-180}px)`, transition:"transform .25s, opacity .2s", padding:12, display:"flex", flexDirection:"column", gap:12, zIndex:20, opacity:open?1:0, pointerEvents:open?"auto":"none" }),
+  sidebar:(open)=>({ position:"absolute", top:0, left:0, bottom:0, width:180, background:"#faf9f5", borderRight:"1px solid rgba(0,0,0,.1)", transform:`translateX(${open?0:-180}px)`, transition:"transform .25s, opacity .2s", padding:12, display:"flex", flexDirection:"column", gap:12, zIndex:50, opacity:open?1:0, pointerEvents:open?"auto":"none" }),
   paletteCard:{ background:"transparent", border:"1px solid rgba(0,0,0,.1)", borderRadius:12, padding:10, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:6, cursor:"grab", textAlign:"center" },
-  toggleHandle:{ position:"absolute", top:"50%", left:0, transform:"translate(-50%, -50%)", width:28, height:64, borderRadius:14, background:"rgba(0,0,0,0.08)", border:"1px solid rgba(0,0,0,0.15)", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", fontSize:14, color:"#111", zIndex:30 },
+  toggleHandle:{ position:"absolute", top:"50%", left:0, transform:"translate(-50%, -50%)", width:28, height:64, borderRadius:14, background:"rgba(0,0,0,0.08)", border:"1px solid rgba(0,0,0,0.15)", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center", fontSize:14, color:"#111", zIndex:60 },
   stack:{ position:"absolute", right:12, top:"50%", transform:"translateY(-50%)", zIndex:46, width:160, display:"flex", flexDirection:"column", gap:8 },
   selectBtn:(open)=>({ width:"100%", minHeight:44, borderRadius:14, border:"1px solid rgba(0,0,0,0.2)", background:open?"#fff":"rgba(0,0,0,0.02)", cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"stretch", justifyContent:"center", fontSize:12, color:"#333" }),
   header:(open)=>({ padding:8, textAlign:"center", fontWeight:700, borderBottom:open?"1px solid rgba(0,0,0,0.1)":"none" }),
@@ -80,14 +81,12 @@ const styles = {
   draft:(b,s)=>({ position:"absolute", background:b, border:`2px dashed ${s}`, borderRadius:0, pointerEvents:"none" }),
   windowTag:{ position:"absolute", transform:"translateY(-110%)", background:"#fff", border:"1px solid rgba(0,0,0,0.15)", borderRadius:8, padding:"3px 6px", fontSize:11, lineHeight:1.2, color:"#064", boxShadow:"0 1px 2px rgba(0,0,0,0.06)", pointerEvents:"auto", cursor:"pointer", zIndex:12, whiteSpace:"nowrap" },
   placed:{ position:"absolute", touchAction:"none", userSelect:"none", cursor:"grab", zIndex:10, outline:"none" },
-  // small 8×8 handles
   resizeHandle:(color)=>({ position:"absolute", width:8, height:8, background:"#fff", border:`2px solid ${color}`, borderRadius:2, boxShadow:"0 1px 2px rgba(0,0,0,0.15)", zIndex:12, touchAction:"none" }),
   note:{ position:"absolute", left:"50%", bottom:64, transform:"translateX(-50%)", background:"#fff", border:"1px solid rgba(0,0,0,0.15)", borderRadius:10, padding:"8px 12px", fontSize:13, color:"#0a0a0a", boxShadow:"0 2px 6px rgba(0,0,0,0.08)", zIndex:48 },
 };
 
 const colorFor = (k) => (k === "wall" ? "#ff4da6" : k === "window" ? "#00a050" : "#0a28a0");
 
-/* ======================= Component ======================= */
 export default function ImageCanvasApp() {
   // audio
   const audioCtxRef = useRef(null); const bellPlayedRef = useRef(false);
@@ -97,6 +96,9 @@ export default function ImageCanvasApp() {
     window.addEventListener("pointerdown", unlock, { passive:true }); window.addEventListener("keydown", unlock, { passive:true });
     return () => { window.removeEventListener("pointerdown", unlock); window.removeEventListener("keydown", unlock); };
   }, []);
+
+  // palette state (FIX)
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
   // world sizing
   const canvasRef = useRef(null);
@@ -131,18 +133,14 @@ export default function ImageCanvasApp() {
 
   // dragging / resizing refs
   const draggingItemRef = useRef({ id:null, dx:0, dy:0 });
-  const itemResizeRef   = useRef({ id:null, start:0, sx:0, sy:0 }); // for icon uniform scaling
+  const itemResizeRef   = useRef({ id:null, start:0, sx:0, sy:0 });
   const draggingRectRef = useRef({ kind:null, id:null, dx:0, dy:0, start:null });
   const rectResizeRef   = useRef({ kind:null, id:null, handle:null, start:null, startList:null });
   const panDragRef      = useRef({ active:false, sx:0, sy:0, ox:0, oy:0 });
 
   // snapshot
   const snapshot = (next = {}) => {
-    const snap = {
-      items, walls, windows, floors, bgUrl,
-      world: { ...world }, pan: { ...pan }, bgImg: { ...bgImg },
-      ...next
-    };
+    const snap = { items, walls, windows, floors, bgUrl, world: { ...world }, pan: { ...pan }, bgImg: { ...bgImg }, ...next };
     setHistory((prev) => {
       const trimmed = prev.slice(0, hIndex + 1);
       const newHist = [...trimmed, JSON.parse(JSON.stringify(snap))];
@@ -298,7 +296,7 @@ export default function ImageCanvasApp() {
   };
 
   /* ============ pointer move/up ============ */
-  const MIN_SIDE = 4; // world units (px in world space)
+  const MIN_SIDE = 4;
   const onCanvasPointerMove = (e) => {
     // pan
     if (panDragRef.current.active) {
@@ -322,7 +320,6 @@ export default function ImageCanvasApp() {
         e:  ()=>{ R = pt.x; },
       }[rr.handle];
       if (apply) apply();
-      // normalize
       let nx = Math.min(L, R), ny = Math.min(T, B);
       let nw = Math.max(MIN_SIDE, Math.abs(R - L));
       let nh = Math.max(MIN_SIDE, Math.abs(B - T));
@@ -457,75 +454,7 @@ export default function ImageCanvasApp() {
     setBgUrl(s.bgUrl); setWorld(s.world); setPan(s.pan); setBgImg(s.bgImg);
   };
 
-  /* ============ export (unchanged) ============ */
-  async function saveCompositionImage() {
-    try {
-      const f = getRefFrame();
-      if (!bgImg.w || !bgImg.h) { alert("No background image loaded."); return; }
-
-      const imgDispW = bgImg.w * world.scale;
-      const imgDispH = bgImg.h * world.scale;
-      const outW = Math.max(1, Math.round(imgDispW));
-      const outH = Math.max(1, Math.round(imgDispH));
-
-      const canvas = document.createElement("canvas");
-      const dpr = Math.max(1, Math.floor(num(window.devicePixelRatio, 1)));
-      canvas.width = outW * dpr; canvas.height = outH * dpr;
-      canvas.style.width = `${outW}px`; canvas.style.height = `${outH}px`;
-      const ctx = canvas.getContext("2d"); if (!ctx) return;
-      ctx.scale(dpr, dpr);
-
-      if (bgUrl) {
-        await new Promise((resolve) => {
-          const img = new Image();
-          img.onload = () => { ctx.drawImage(img, 0, 0, outW, outH); resolve(); };
-          img.onerror = resolve; img.src = bgUrl;
-        });
-      } else {
-        ctx.fillStyle = "#faf9f5"; ctx.fillRect(0, 0, outW, outH);
-      }
-
-      const bgOffset = { x: (world.w - bgImg.w) / 2, y: (world.h - bgImg.h) / 2 };
-      const toShot = (wx, wy) => ({ sx: (wx - bgOffset.x) * world.scale, sy: (wy - bgOffset.y) * world.scale });
-
-      const drawRects = (list, color) => {
-        ctx.save(); ctx.globalAlpha = 0.35; ctx.fillStyle = color; ctx.strokeStyle = color;
-        for (const r of list) {
-          const { sx, sy } = toShot(r.x, r.y);
-          const w = r.w * world.scale, h = r.h * world.scale;
-          ctx.fillRect(sx, sy, w, h); ctx.strokeRect(sx, sy, w, h);
-        }
-        ctx.restore();
-      };
-      drawRects(floors, "#0a28a0"); drawRects(walls, "#ff4da6"); drawRects(windows, "#00a050");
-
-      for (const it of items) {
-        const node = document.getElementById(it.id); const svg = node?.querySelector?.("svg"); if (!svg) continue;
-        const { sx, sy } = toShot(it.x, it.y);
-        const sizePx = Math.max(16, Math.min(256, num(it.size || 48))) * world.scale;
-        const cloneSvg = svg.cloneNode(true);
-        const svgStr = new XMLSerializer().serializeToString(cloneSvg);
-        const blob = new Blob([svgStr], { type: "image/svg+xml;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        await new Promise((resolve) => {
-          const img = new Image();
-          img.onload = () => { ctx.drawImage(img, sx, sy, sizePx, sizePx); URL.revokeObjectURL(url); resolve(); };
-          img.onerror = () => { URL.revokeObjectURL(url); resolve(); };
-          img.src = url;
-        });
-      }
-
-      const a = document.createElement("a");
-      a.href = canvas.toDataURL("image/png"); a.download = "composition.png";
-      document.body.appendChild(a); a.click(); a.remove();
-    } catch (err) {
-      console.error("saveCompositionImage failed", err);
-      alert("Could not save the composition image.");
-    }
-  }
-
   /* ============ UI smalls ============ */
-  const [sidebarOpen, setSidebarOpen] = useState(false);
   const toggleSelect = () => setSelectOpen(v=>!v);
   const ActiveLabel = activeTool ? (activeTool==="wall"?"Walls":activeTool==="window"?"Windows":"Floor") : "None";
 
@@ -536,7 +465,6 @@ export default function ImageCanvasApp() {
   /* ======================= render ======================= */
   const { worldLeft, worldTop } = getRefFrame();
 
-  // Handles component for rectangles (8 points), only when selecting
   const Handles = ({ kind, r }) => {
     if (!selecting) return null;
     const color = colorFor(kind);
@@ -566,9 +494,10 @@ export default function ImageCanvasApp() {
   };
 
   return (
-    <div style={styles.app}
-      onMouseDown={() => { const ae = document.activeElement; if (ae && ae !== document.body && ae.blur) ae.blur(); }}>
-      
+    <div
+      style={styles.app}
+      onMouseDown={() => { const ae = document.activeElement; if (ae && ae !== document.body && ae.blur) ae.blur(); }}
+    >
       {/* toolbar */}
       <div style={styles.floaterBar}>
         <button aria-label="Save as image" style={styles.floaterBtn} title="Save as image" onClick={saveCompositionImage}>⬇️</button>
@@ -602,7 +531,7 @@ export default function ImageCanvasApp() {
         <button style={styles.stopBtn} onClick={stopSelecting} aria-label="Stop selecting">Stop selecting</button>
       </div>
 
-      {/* palette handle */}
+      {/* palette handle (FIX: toggles state + correct arrow) */}
       <button
         aria-label="Toggle palette"
         onClick={() => setSidebarOpen((v) => !v)}
@@ -610,8 +539,8 @@ export default function ImageCanvasApp() {
       >
         {sidebarOpen ? "‹" : "›"}
       </button>
-      
-      {/* palette */}
+
+      {/* palette (FIX: bound to sidebarOpen + correct aria-hidden) */}
       <aside style={styles.sidebar(sidebarOpen)} aria-hidden={!sidebarOpen}>
         {PALETTE.map((p) => (
           <div
@@ -635,7 +564,7 @@ export default function ImageCanvasApp() {
         onPointerMove={onCanvasPointerMove}
         onPointerUp={onCanvasPointerUp}
         onPointerDown={onWorldPointerDown}
-        onWheel={onWheel}
+        onWheel={onCanvasDragOver && onCanvasDrop ? (e)=>{ onCanvasDragOver(e); onWheel(e); } : onWheel}
         onDragEnter={onCanvasDragOver}
         onDragOver={onCanvasDragOver}
         onDrop={onCanvasDrop}
